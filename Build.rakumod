@@ -473,6 +473,9 @@ class Build {
 		my @cmd;
 		given $os {
 			when /darwin/ {
+				# -Wl,-undefined,error: default on macOS but set
+				# it explicitly so a future env-level override
+				# can't sneak in a lenient link.
 				@cmd = 'cc', '-O2', '-fPIC', '-dynamiclib',
 					'-Wall', '-Wextra', '-Wno-unused-parameter',
 					'-install_name', "\@loader_path/$shim-name",
@@ -480,6 +483,7 @@ class Build {
 					'-L', $link-dir.Str,
 					'-lonnxruntime',
 					'-Wl,-rpath,@loader_path',
+					'-Wl,-undefined,error',
 					'-o', $shim.Str, $src;
 				@cmd.splice(2, 0, '-DONNX_SHIM_WITH_CUDA=1') if $with-cuda;
 			}
@@ -488,7 +492,8 @@ class Build {
 				# Command Prompt (CI uses ilammy/msvc-dev-cmd).
 				# Links against onnxruntime.lib (import library)
 				# staged alongside onnxruntime.dll by Microsoft's
-				# prebuilt.
+				# prebuilt. MSVC already fails the link on
+				# unresolved symbols.
 				my IO::Path $import-lib = $link-dir.add('onnxruntime.lib');
 				unless $import-lib.e {
 					die "❌ onnxruntime.lib not found at $import-lib. "
@@ -506,12 +511,27 @@ class Build {
 				@cmd.splice(4, 0, '/DONNX_SHIM_WITH_CUDA=1') if $with-cuda;
 			}
 			default {
+				# -Wl,--no-undefined: GCC's default for `-shared`
+				# is to let undefined references slide at link
+				# time and fail at dlopen. That turns a missing
+				# `-lonnxruntime` resolve into a runtime
+				# "undefined symbol: OrtGetApiBase" at first load
+				# — which is miserable to diagnose. --no-undefined
+				# flips that to a hard link error instead.
+				#
+				# --enable-new-dtags makes the `-Wl,-rpath` we set
+				# emit a RUNPATH entry (searched after LD_LIBRARY_PATH)
+				# rather than the legacy RPATH (searched before).
+				# Matters for users who explicitly override via
+				# LD_LIBRARY_PATH — their override wins.
 				@cmd = 'cc', '-O2', '-fPIC', '-shared',
 					'-Wall', '-Wextra', '-Wno-unused-parameter',
 					'-I', $include-dir.Str,
 					'-L', $link-dir.Str,
 					'-lonnxruntime',
 					'-Wl,-rpath,$ORIGIN',
+					'-Wl,--enable-new-dtags',
+					'-Wl,--no-undefined',
 					'-o', $shim.Str, $src;
 				@cmd.splice(2, 0, '-DONNX_SHIM_WITH_CUDA=1') if $with-cuda;
 			}
@@ -522,9 +542,43 @@ class Build {
 		my $err = $rc.err.slurp(:close);
 		if $rc.exitcode == 0 {
 			say "✅ Compiled onnx_native_shim → $shim.";
+			# Dump the shim's linkage so a broken build in CI
+			# surfaces the missing NEEDED / RPATH immediately in
+			# the log rather than at first dlopen.
+			self!inspect-shim($shim);
 		}
 		else {
 			die "❌ Failed to compile onnx_native_shim: $err\nSTDOUT: $out\n";
+		}
+	}
+
+	#| Print the shim's linkage info (NEEDED libraries, rpath /
+	#| runpath, exported symbols) using platform-native tools.
+	#| Best-effort diagnostic — swallows failures because the
+	#| install path shouldn't break just because `readelf` isn't
+	#| in PATH on some obscure distro.
+	method !inspect-shim(IO::Path $shim) {
+		my Str $os = $*KERNEL.name.lc;
+		my @probes = do given $os {
+			when /darwin/ {
+				(('otool', '-L', $shim.Str),)
+			}
+			when $*DISTRO.is-win {
+				(('dumpbin', '/dependents', $shim.Str),
+				 ('dumpbin', '/exports',    $shim.Str),)
+			}
+			default {
+				(('ldd', $shim.Str),
+				 ('readelf', '-d', $shim.Str),)
+			}
+		};
+		for @probes -> @cmd {
+			my $proc = try { run |@cmd, :out, :err };
+			next unless $proc.defined;
+			my $out = $proc.out.slurp(:close);
+			$proc.err.slurp(:close);
+			say "--- { @cmd.join(' ') } ---";
+			print $out;
 		}
 	}
 

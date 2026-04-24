@@ -124,13 +124,13 @@ no_api_error(char **out_error)
     return ORT_FAIL;
 }
 
-void
+ONNX_SHIM_EXPORT void
 onnx_shim_free_error(char *err)
 {
     free(err);
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_api_version(void)
 {
     return ORT_API_VERSION;
@@ -138,7 +138,7 @@ onnx_shim_api_version(void)
 
 /* --- Env --- */
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_init(const char *log_id, OrtEnv **out_env, char **out_error)
 {
     if (out_error != NULL) { *out_error = NULL; }
@@ -158,7 +158,7 @@ onnx_shim_init(const char *log_id, OrtEnv **out_env, char **out_error)
     return consume_status(st, out_error);
 }
 
-void
+ONNX_SHIM_EXPORT void
 onnx_shim_release_env(OrtEnv *env)
 {
     if (env == NULL) { return; }
@@ -169,7 +169,7 @@ onnx_shim_release_env(OrtEnv *env)
 
 /* --- Session options --- */
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_create_session_options(OrtSessionOptions **out, char **out_error)
 {
     if (out_error != NULL) { *out_error = NULL; }
@@ -199,7 +199,7 @@ onnx_shim_create_session_options(OrtSessionOptions **out, char **out_error)
     return ORT_OK;
 }
 
-void
+ONNX_SHIM_EXPORT void
 onnx_shim_release_session_options(OrtSessionOptions *options)
 {
     if (options == NULL) { return; }
@@ -226,7 +226,7 @@ OrtSessionOptionsAppendExecutionProvider_DML(
     OrtSessionOptions *options, int device_id);
 #endif
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_enable_provider(OrtSessionOptions *options,
                           const char *provider_name,
                           int64_t flags,
@@ -292,7 +292,7 @@ onnx_shim_enable_provider(OrtSessionOptions *options,
 
 /* --- Session --- */
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_create_session_from_path(OrtEnv *env,
                                    const char *model_path,
                                    OrtSessionOptions *options,
@@ -340,7 +340,7 @@ onnx_shim_create_session_from_path(OrtEnv *env,
     return consume_status(st, out_error);
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_create_session_from_buffer(OrtEnv *env,
                                      const void *buf,
                                      size_t len,
@@ -363,7 +363,7 @@ onnx_shim_create_session_from_buffer(OrtEnv *env,
     return consume_status(st, out_error);
 }
 
-void
+ONNX_SHIM_EXPORT void
 onnx_shim_release_session(OrtSession *session)
 {
     if (session == NULL) { return; }
@@ -374,7 +374,7 @@ onnx_shim_release_session(OrtSession *session)
 
 /* --- Session introspection --- */
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_session_input_count(OrtSession *session,
                               size_t *out,
                               char **out_error)
@@ -391,7 +391,7 @@ onnx_shim_session_input_count(OrtSession *session,
     return consume_status(ort->SessionGetInputCount(session, out), out_error);
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_session_output_count(OrtSession *session,
                                size_t *out,
                                char **out_error)
@@ -456,7 +456,7 @@ fetch_name_via(OrtStatusPtr (*getter)(const OrtSession *, size_t,
     return ORT_OK;
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_session_input_name(OrtSession *session,
                              size_t idx,
                              char **out_name,
@@ -468,7 +468,7 @@ onnx_shim_session_input_name(OrtSession *session,
                           out_name, out_error);
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_session_output_name(OrtSession *session,
                               size_t idx,
                               char **out_name,
@@ -480,7 +480,7 @@ onnx_shim_session_output_name(OrtSession *session,
                           out_name, out_error);
 }
 
-void
+ONNX_SHIM_EXPORT void
 onnx_shim_free_name(char *name)
 {
     /* We allocated via malloc in fetch_name_via, so plain free. */
@@ -562,7 +562,7 @@ session_type_info_common(OrtStatusPtr (*getter)(const OrtSession *, size_t,
     return code;
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_session_input_type_info(OrtSession *session,
                                   size_t idx,
                                   int32_t *out_elem_type,
@@ -579,7 +579,7 @@ onnx_shim_session_input_type_info(OrtSession *session,
                                     out_error);
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_session_output_type_info(OrtSession *session,
                                    size_t idx,
                                    int32_t *out_elem_type,
@@ -598,7 +598,7 @@ onnx_shim_session_output_type_info(OrtSession *session,
 
 /* --- Tensors --- */
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_create_tensor(const void *data,
                         size_t byte_len,
                         const int64_t *shape,
@@ -640,7 +640,7 @@ onnx_shim_create_tensor(const void *data,
     return code;
 }
 
-void
+ONNX_SHIM_EXPORT void
 onnx_shim_release_value(OrtValue *value)
 {
     if (value == NULL) { return; }
@@ -649,7 +649,7 @@ onnx_shim_release_value(OrtValue *value)
     ort->ReleaseValue(value);
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_tensor_shape(OrtValue *value,
                        int32_t *out_elem_type,
                        size_t *out_rank,
@@ -675,7 +675,7 @@ onnx_shim_tensor_shape(OrtValue *value,
     return code;
 }
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_tensor_data(OrtValue *value,
                       void **out_data,
                       size_t *out_byte_len,
@@ -743,7 +743,7 @@ onnx_shim_tensor_data(OrtValue *value,
 
 /* --- Run --- */
 
-int
+ONNX_SHIM_EXPORT int
 onnx_shim_run(OrtSession *session,
               const char *const *input_names,
               OrtValue *const *inputs,

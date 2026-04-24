@@ -152,18 +152,35 @@ jobs:
               -I staged/include \
               -L staged/lib -lonnxruntime \
               -Wl,-rpath,@loader_path \
+              -Wl,-undefined,error \
               -o "${shim}" \
               src/onnx_native_shim.c
+            echo '--- otool -L ---'
             otool -L "${shim}"
+            echo '--- exported symbols ---'
+            nm -g "${shim}" | grep -i onnx_shim | head -30 || true
           else
+            # --no-undefined: GCC's default for -shared lets
+            # undefined refs survive the link. If -lonnxruntime
+            # doesn't resolve, we want a loud link-time error
+            # rather than a silent "undefined symbol: OrtGetApiBase"
+            # at first dlopen. --enable-new-dtags emits RUNPATH
+            # so LD_LIBRARY_PATH still wins for user overrides.
             cc -O2 -fPIC -shared \
               -Wall -Wextra -Wno-unused-parameter \
               -I staged/include \
               -L staged/lib -lonnxruntime \
               -Wl,-rpath,'$ORIGIN' \
+              -Wl,--enable-new-dtags \
+              -Wl,--no-undefined \
               -o "${shim}" \
               src/onnx_native_shim.c
+            echo '--- ldd ---'
             ldd "${shim}" || true
+            echo '--- readelf NEEDED / RUNPATH ---'
+            readelf -d "${shim}" | grep -E 'NEEDED|RUNPATH|RPATH' || true
+            echo '--- exported symbols ---'
+            nm -D --defined-only "${shim}" | grep onnx_shim | head -30 || true
           fi
 
           file "${shim}"
@@ -177,6 +194,13 @@ jobs:
             src\onnx_native_shim.c ^
             /link /LIBPATH:staged\lib onnxruntime.lib ^
             /OUT:staged\lib\libonnx_native_shim.dll
+
+      - name: Inspect Windows shim
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          dumpbin /dependents staged\lib\libonnx_native_shim.dll
+          dumpbin /exports staged\lib\libonnx_native_shim.dll
 
       # --- Package tarball -----------------------------------------
 
