@@ -15,16 +15,12 @@
 # boundary: any tarball whose sha doesn't match is refused before
 # extraction.
 #
-# The macos-arm64 entry below was computed locally by packaging a
-# known-good staged install — real CI-generated checksums will
-# replace it once build-binaries.yml runs on the tagged repo.
+# These hashes are for binaries-onnxruntime-1.20.0-r2, produced
+# by the first Release that includes the windows-arm64 variant.
 
-3e0a668b18ccf2d3fca2ee8f813c63cf3623ce8620e522825f82b5c15976ec1c  onnxruntime-macos-arm64.tar.gz
-
-# TODO: populate these after the first build-binaries.yml run.
-# Until then, installs on these platforms fall through to the
-# system-libonnxruntime path (install via brew / apt first).
-#  <sha>  onnxruntime-macos-x86_64.tar.gz
-#  <sha>  onnxruntime-linux-x86_64-glibc.tar.gz
-#  <sha>  onnxruntime-linux-aarch64-glibc.tar.gz
-#  <sha>  onnxruntime-windows-x86_64.zip
+f0af11fd59e5837309aa2573f928cb7b5a26657a6cdfd4522f85d9dc216f4234  onnxruntime-macos-arm64.tar.gz
+a87cd2ff08d544ab105d1ecc6def892a784d06db3b63f03f605f451b2d2f8fb7  onnxruntime-macos-x86_64.tar.gz
+21e814fbc4c4ae91f80ddcdb34c12e2c6e78e9b2254a2f6fae9384bea46c6310  onnxruntime-linux-x86_64-glibc.tar.gz
+9a02d6eff056bce256adf62fd673499945fccd1182adef2ab6cf30df9e11a6de  onnxruntime-linux-aarch64-glibc.tar.gz
+09fa990a4288b633a2ba56c4390c7b9cef1c5a1c76495daebb69fe2096b55a06  onnxruntime-windows-x86_64.zip
+f1bea58ee9fdebe66701c93bc05391814eb5f037c7849f90750e7f26ba0b47db  onnxruntime-windows-arm64.zip
