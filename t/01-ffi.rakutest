@@ -1,0 +1,76 @@
+use Test;
+use lib 'lib';
+use ONNX::Native::FFI;
+use NativeCall;
+
+plan 5;
+
+subtest 'shim loads + reports API version' => {
+	plan 2;
+	my $v = onnx_shim_api_version();
+	ok $v > 0, "API version is positive: $v";
+	# The shim is compiled against ORT 1.20.x which is API_VERSION 20.
+	# Newer ORT keeps this non-decreasing, so >= 20 is the right
+	# lower bound. Bump the header+shim together, never alone.
+	ok $v >= 20, "API version is ≥ 20 (got $v)";
+};
+
+subtest 'env lifecycle' => {
+	plan 3;
+	my $env-slot = CArray[OrtEnvHandle].new;
+	$env-slot[0] = OrtEnvHandle;
+	my $err = err-slot();
+
+	my $rc = onnx_shim_init('ffi-smoke', $env-slot, $err);
+	is $rc, ORT_OK, 'init returns ORT_OK';
+	ok $env-slot[0].defined, 'env handle is defined';
+	lives-ok { onnx_shim_release_env($env-slot[0]) },
+		'release_env completes without error';
+};
+
+subtest 'session options lifecycle' => {
+	plan 3;
+	my $opts-slot = CArray[OrtSessionOptionsHandle].new;
+	$opts-slot[0] = OrtSessionOptionsHandle;
+	my $err = err-slot();
+
+	my $rc = onnx_shim_create_session_options($opts-slot, $err);
+	is $rc, ORT_OK, 'create_session_options returns ORT_OK';
+	ok $opts-slot[0].defined, 'options handle is defined';
+	lives-ok { onnx_shim_release_session_options($opts-slot[0]) },
+		'release_session_options completes';
+};
+
+subtest 'cpu provider registration is a no-op' => {
+	plan 2;
+	my $opts = CArray[OrtSessionOptionsHandle].new;
+	$opts[0] = OrtSessionOptionsHandle;
+	my $err = err-slot();
+	onnx_shim_create_session_options($opts, $err);
+
+	my $rc = onnx_shim_enable_provider($opts[0], 'cpu', 0, $err);
+	is $rc, ORT_OK, 'cpu provider enable is OK';
+	nok $err[0].defined, 'no error set for cpu provider';
+
+	onnx_shim_release_session_options($opts[0]);
+};
+
+subtest 'unknown provider gives clean error' => {
+	plan 3;
+	my $opts = CArray[OrtSessionOptionsHandle].new;
+	$opts[0] = OrtSessionOptionsHandle;
+	my $err = err-slot();
+	onnx_shim_create_session_options($opts, $err);
+
+	my $rc = onnx_shim_enable_provider(
+		$opts[0], 'bogus-provider', 0, $err);
+	is $rc, ORT_INVALID_ARGUMENT,
+		'unknown provider returns INVALID_ARGUMENT';
+
+	my $msg = ffi-extract-error($err);
+	ok $msg.defined, 'error message populated';
+	ok $msg.contains('bogus-provider'),
+		"error names the bogus provider: '$msg'";
+
+	onnx_shim_release_session_options($opts[0]);
+};

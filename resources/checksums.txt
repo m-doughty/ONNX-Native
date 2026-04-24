@@ -1,0 +1,30 @@
+# SHA256 checksums of the per-platform GitHub Release tarballs.
+#
+# Format: <sha256>  <filename>
+#
+# Produced by .github/workflows/build-binaries.yml, which:
+#   1. Fetches Microsoft's upstream libonnxruntime prebuilt for
+#      each platform.
+#   2. Compiles src/onnx_native_shim.c against it.
+#   3. Packages (lib/ + include/) into one tarball per platform
+#      and computes its sha256.
+#
+# After the CI workflow runs for a new BINARY_TAG, paste the
+# workflow-generated checksums.txt contents below (replacing the
+# prior set). Build.rakumod treats these as a hard security
+# boundary: any tarball whose sha doesn't match is refused before
+# extraction.
+#
+# The macos-arm64 entry below was computed locally by packaging a
+# known-good staged install — real CI-generated checksums will
+# replace it once build-binaries.yml runs on the tagged repo.
+
+3e0a668b18ccf2d3fca2ee8f813c63cf3623ce8620e522825f82b5c15976ec1c  onnxruntime-macos-arm64.tar.gz
+
+# TODO: populate these after the first build-binaries.yml run.
+# Until then, installs on these platforms fall through to the
+# system-libonnxruntime path (install via brew / apt first).
+#  <sha>  onnxruntime-macos-x86_64.tar.gz
+#  <sha>  onnxruntime-linux-x86_64-glibc.tar.gz
+#  <sha>  onnxruntime-linux-aarch64-glibc.tar.gz
+#  <sha>  onnxruntime-windows-x86_64.zip

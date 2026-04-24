@@ -1,0 +1,63 @@
+# Install ONNX::Native via the prebuilt path (zef install →
+# Build.rakumod fetches our GitHub Release tarball, verifies,
+# stages) on every push / PR, and run the test suite on
+# macOS, Linux, Windows.
+#
+# For this workflow to be green, build-binaries.yml must have
+# already published a Release for the current BINARY_TAG. On
+# unreleased BINARY_TAGs the prebuilt-path install fails; the
+# workflow then exercises the fallback (system libonnxruntime
+# or compile-from-source).
+
+name: test
+
+on:
+  push:
+    branches:
+      - '*'
+    tags-ignore:
+      - 'binaries-*'
+  pull_request:
+
+jobs:
+  raku:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        raku-version:
+          - 'latest'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Raku/setup-raku@v1
+        with:
+          raku-version: ${{ matrix.raku-version }}
+
+      # Windows needs the VS Dev Environment on PATH so that
+      # Build.rakumod's fallback shim-compile path can find `cl`
+      # on runners with no published prebuilt yet.
+      - name: Setup VS Dev Environment (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install App::Prove6
+        run: zef install --/test App::Prove6
+
+      # --- Prebuilt path -------------------------------------------
+      #
+      # zef install exercises Build.rakumod's download-from-our-
+      # Release path. This only succeeds once build-binaries.yml
+      # has published a Release for the current BINARY_TAG; on
+      # unreleased BINARY_TAGs it falls through to the source
+      # fallback (which also has to work cleanly).
+      - name: Install ONNX::Native
+        run: zef install --/test --force-install .
+
+      - name: Run tests
+        run: prove6 -Ilib t

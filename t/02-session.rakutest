@@ -1,0 +1,76 @@
+use Test;
+use lib 'lib';
+use ONNX::Native;
+use ONNX::Native::Types;
+
+plan 8;
+
+my $fixture = 't/fixtures/add.onnx';
+ok $fixture.IO.f, 'add.onnx fixture exists';
+
+subtest 'session loads + dispose is idempotent' => {
+	plan 3;
+	my $s = Session.new(:path($fixture));
+	ok $s.defined, 'Session.new returns a session';
+	lives-ok { $s.dispose }, 'first dispose works';
+	lives-ok { $s.dispose }, 'second dispose is a no-op';
+};
+
+subtest 'input-count / output-count' => {
+	plan 2;
+	my $s = Session.new(:path($fixture));
+	is $s.input-count, 2, 'add.onnx has 2 inputs';
+	is $s.output-count, 1, 'add.onnx has 1 output';
+};
+
+subtest 'input-names / output-names' => {
+	plan 2;
+	my $s = Session.new(:path($fixture));
+	is-deeply $s.input-names.List, <A B>.List, 'inputs are A, B';
+	is-deeply $s.output-names.List, ('C',).List, 'output is C';
+};
+
+subtest 'input-info / output-info return TensorInfo' => {
+	plan 6;
+	my $s = Session.new(:path($fixture));
+	for <A B> -> $name {
+		my $info = $s.input-info($name);
+		isa-ok $info, TensorInfo, "$name info is a TensorInfo";
+		is $info.elem-type, FLOAT32, "$name dtype is FLOAT32";
+		is-deeply $info.shape.List, (3,).List, "$name shape is [3]";
+	}
+};
+
+subtest 'output-info for C' => {
+	plan 3;
+	my $s = Session.new(:path($fixture));
+	my $info = $s.output-info('C');
+	isa-ok $info, TensorInfo, 'C info is a TensorInfo';
+	is $info.elem-type, FLOAT32, 'C dtype is FLOAT32';
+	is-deeply $info.shape.List, (3,).List, 'C shape is [3]';
+};
+
+subtest 'unknown input name throws a helpful error' => {
+	plan 2;
+	my $s = Session.new(:path($fixture));
+	my $exception;
+	try {
+		$s.input-info('nope');
+		CATCH { default { $exception = $_; } }
+	}
+	ok $exception.defined, 'threw an exception';
+	ok $exception.message.contains('nope'),
+		"error message names the bad input: '{ $exception.message }'";
+};
+
+subtest 'missing model file throws NO_SUCHFILE' => {
+	plan 2;
+	my $exception;
+	try {
+		Session.new(:path</does/not/exist.onnx>);
+		CATCH { default { $exception = $_; } }
+	}
+	ok $exception.defined, 'threw an exception';
+	isa-ok $exception, X::ONNX::Native::Error,
+		'exception is an ONNX::Native::Error';
+};

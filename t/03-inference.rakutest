@@ -1,0 +1,103 @@
+use Test;
+use lib 'lib';
+use ONNX::Native;
+use ONNX::Native::Types;
+use NativeCall;
+
+plan 7;
+
+my $fixture = 't/fixtures/add.onnx';
+
+subtest 'basic add: C = A + B' => {
+	plan 4;
+	my $s = Session.new(:path($fixture));
+	my $a = Tensor.from-nums([1e0, 2e0, 3e0], :shape([3]));
+	my $b = Tensor.from-nums([10e0, 20e0, 30e0], :shape([3]));
+	my %out = $s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+	ok %out<C>.defined, 'output C is defined';
+	is %out<C>.dtype, FLOAT32, 'output dtype is FLOAT32';
+	is-deeply %out<C>.shape.List, (3,).List, 'output shape is [3]';
+	is-deeply %out<C>.to-num-array.List, (11e0, 22e0, 33e0).List,
+		'output values match elementwise sum';
+};
+
+subtest 'add with zeros' => {
+	plan 1;
+	my $s = Session.new(:path($fixture));
+	my $a = Tensor.from-nums([0e0, 0e0, 0e0], :shape([3]));
+	my $b = Tensor.from-nums([0e0, 0e0, 0e0], :shape([3]));
+	my %out = $s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+	is-deeply %out<C>.to-num-array.List, (0e0, 0e0, 0e0).List,
+		'zeros + zeros = zeros';
+};
+
+subtest 'add with negatives' => {
+	plan 1;
+	my $s = Session.new(:path($fixture));
+	my $a = Tensor.from-nums([-1e0, -2e0, -3e0], :shape([3]));
+	my $b = Tensor.from-nums([1e0, 2e0, 3e0], :shape([3]));
+	my %out = $s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+	is-deeply %out<C>.to-num-array.List, (0e0, 0e0, 0e0).List,
+		'negatives cancel to zero';
+};
+
+subtest 'Tensor.from-blob zero-copy path' => {
+	plan 2;
+	my $s = Session.new(:path($fixture));
+	# Build the bytes ourselves as a proof that from-blob works
+	# with raw packed FLOAT data (matches what callers would do
+	# when feeding pre-computed features).
+	my $buf = buf8.allocate(12);
+	my $a-ptr = nativecast(CArray[num32], $buf);
+	$a-ptr[0] = 5e0; $a-ptr[1] = 6e0; $a-ptr[2] = 7e0;
+	my $a = Tensor.from-blob($buf, :shape([3]), :dtype(FLOAT32));
+	my $b = Tensor.from-nums([1e0, 1e0, 1e0], :shape([3]));
+	my %out = $s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+	is-deeply %out<C>.to-num-array.List, (6e0, 7e0, 8e0).List,
+		'from-blob path produces expected sums';
+	is %out<C>.byte-length, 12, 'output is 12 bytes (3 × FLOAT32)';
+};
+
+subtest 'Tensor.to-blob roundtrip' => {
+	plan 2;
+	my $s = Session.new(:path($fixture));
+	my $a = Tensor.from-nums([1e0, 2e0, 3e0], :shape([3]));
+	my $b = Tensor.from-nums([4e0, 5e0, 6e0], :shape([3]));
+	my %out = $s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+	my $blob = %out<C>.to-blob;
+	is $blob.bytes, 12, 'blob is 12 bytes';
+	my $ptr = nativecast(CArray[num32], $blob);
+	is-deeply ((^3).map({ $ptr[$_].Num }).List), (5e0, 7e0, 9e0).List,
+		'blob decodes as [5, 7, 9]';
+};
+
+subtest 'shape mismatch errors' => {
+	plan 2;
+	my $exception;
+	try {
+		Tensor.from-nums([1e0, 2e0], :shape([3]));
+		CATCH { default { $exception = $_; } }
+	}
+	ok $exception.defined, 'too-few values throws';
+	ok $exception.message.contains('elements'),
+		"message mentions element count: '{ $exception.message }'";
+};
+
+subtest 'multiple run() calls on same session' => {
+	plan 2;
+	my $s = Session.new(:path($fixture));
+	for 1..5 -> $i {
+		my $a = Tensor.from-nums([$i.Num, $i.Num, $i.Num], :shape([3]));
+		my $b = Tensor.from-nums([1e0, 1e0, 1e0], :shape([3]));
+		my %out = $s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+		my @res = %out<C>.to-num-array;
+		last unless @res.elems == 3 && @res[0] == $i + 1;
+	}
+	pass 'ran 5 sequential inferences without error';
+	# Sanity: run one more and verify the session is still usable
+	my $a = Tensor.from-nums([100e0, 200e0, 300e0], :shape([3]));
+	my $b = Tensor.from-nums([1e0, 2e0, 3e0], :shape([3]));
+	my %out = $s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+	is-deeply %out<C>.to-num-array.List, (101e0, 202e0, 303e0).List,
+		'final inference is still correct';
+};

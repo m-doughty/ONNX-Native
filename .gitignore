@@ -1,0 +1,78 @@
+# === Raku ===
+.precomp/
+lib/.precomp/
+*.moarvm
+
+# === Native build artefacts (shim intermediates) ===
+*.o
+*.obj
+*.a
+*.lib
+*.exp
+*.pdb
+*.so
+*.so.*
+*.dll
+*.dylib
+*.dylib.dSYM/
+*.exe
+*.out
+*.ilk
+.clangd
+
+# === Staged ORT artefacts we don't commit ===
+# BINARY_TAG and resources/BINARY_TAG + resources/REVISION ARE
+# tracked — the ones below get produced by Build.rakumod at
+# install time and live in $XDG_DATA_HOME, but this catches any
+# accidental copies inside the source tree.
+/lib/onnxruntime*
+/lib/libonnxruntime*
+/resources/lib/
+/resources/include/
+/resources/onnxruntime*
+onnxruntime-*/
+onnxruntime-osx-*.tgz
+onnxruntime-linux-*.tgz
+onnxruntime-win-*.zip
+
+# === macOS ===
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# === Linux ===
+core
+*.core
+*.stackdump
+
+# === Windows ===
+Thumbs.db
+desktop.ini
+nul
+
+# === Editors ===
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*.swn
+*~
+*.kate-swp
+.netrwhist
+
+# === Checkpoint / backup ===
+*.bak
+*.tmp
+*.old
+*.orig
+*.rej
+
+# === Logs ===
+*.log
+
+# === Python (for fixture tooling, should it ever appear) ===
+__pycache__/
+*.py[cod]

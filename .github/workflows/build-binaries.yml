@@ -1,0 +1,303 @@
+# Build onnx_native_shim per platform against Microsoft's upstream
+# ONNX Runtime prebuilts, package the (libonnxruntime + shim) pair
+# into a per-platform tarball, and publish everything to a GitHub
+# Release tagged with this module's BINARY_TAG.
+#
+# Triggers:
+#   - workflow_dispatch: manual (normal path during recipe
+#     development).
+#   - push: tags matching `binaries-*`: production. Push a tag
+#     like `binaries-onnxruntime-1.20.0-r1` (matching BINARY_TAG)
+#     and CI publishes the matching Release.
+#
+# Binary artefacts are versioned INDEPENDENTLY of the Raku dist
+# version — see Build.rakumod's header for the rationale.
+
+name: build-binaries
+
+on:
+  workflow_dispatch:
+
+  push:
+    tags:
+      - 'binaries-*'
+
+permissions:
+  contents: write   # needed for creating / updating releases
+
+env:
+  # Upstream ORT version we build against. Must match the version
+  # encoded in this repo's BINARY_TAG file. The tag format is
+  # `binaries-onnxruntime-<version>-r<rev>`.
+  ORT_VERSION: '1.20.0'
+
+jobs:
+  build:
+    name: build-${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS arm64 — native build on GHA's M-series runners.
+          - os: macos-14
+            platform: macos-arm64
+            ort-artifact: onnxruntime-osx-arm64
+            lib-ext: dylib
+
+          # macOS x86_64 — Microsoft ships a separate prebuilt;
+          # cross-compile here on the arm64 runner. If GHA brings
+          # back dedicated x86_64 macOS runners, switch to that.
+          - os: macos-14
+            platform: macos-x86_64
+            ort-artifact: onnxruntime-osx-x86_64
+            lib-ext: dylib
+
+          # Linux x86_64 — ubuntu-22.04 gives us glibc 2.35 (matches
+          # the MIN-GLIBC constant in Build.rakumod).
+          - os: ubuntu-22.04
+            platform: linux-x86_64-glibc
+            ort-artifact: onnxruntime-linux-x64
+            lib-ext: so
+
+          # Linux aarch64 — native ARM runner.
+          - os: ubuntu-22.04-arm
+            platform: linux-aarch64-glibc
+            ort-artifact: onnxruntime-linux-aarch64
+            lib-ext: so
+
+          # Windows x86_64 — MSVC via ilammy/msvc-dev-cmd.
+          - os: windows-2022
+            platform: windows-x86_64
+            ort-artifact: onnxruntime-win-x64
+            lib-ext: dll
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Upstream ORT download -----------------------------------
+
+      - name: Download Microsoft upstream ONNX Runtime prebuilt
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ext=tgz
+          if [[ "${{ matrix.platform }}" == windows-* ]]; then
+            ext=zip
+          fi
+          artifact="${{ matrix.ort-artifact }}-${ORT_VERSION}.${ext}"
+          url="https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${artifact}"
+          curl -fL -o "${artifact}" "${url}"
+          mkdir -p upstream
+          case "${ext}" in
+            tgz) tar -xzf "${artifact}" -C upstream ;;
+            zip)
+              # Expand-Archive via PowerShell keeps path handling
+              # consistent on Windows runners — bash `unzip` isn't
+              # guaranteed.
+              powershell -NoProfile -Command \
+                "Expand-Archive -LiteralPath '${artifact}' -DestinationPath 'upstream' -Force"
+              ;;
+          esac
+
+      - name: Locate upstream root + stage lib/include
+        id: upstream
+        shell: bash
+        run: |
+          set -euxo pipefail
+          # Microsoft wraps everything in onnxruntime-<plat>-<ver>/
+          # — locate that dir.
+          root=$(find upstream -maxdepth 1 -mindepth 1 -type d | head -n1)
+          if [[ -z "$root" ]]; then
+            echo "::error::Couldn't find wrapping dir inside upstream/"
+            exit 1
+          fi
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+          mkdir -p staged/lib staged/include
+          cp -R "$root/lib/." staged/lib/
+          cp -R "$root/include/." staged/include/
+          ls staged/lib
+          ls staged/include
+
+      # --- Platform-specific toolchain setup -----------------------
+
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      # --- Build shim ----------------------------------------------
+
+      - name: Build shim (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ext=${{ matrix.lib-ext }}
+          shim="staged/lib/libonnx_native_shim.${ext}"
+
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            # When building the x86_64 macOS shim on an arm64
+            # runner, use the -arch flag to cross-compile. For the
+            # native arm64 build, arch is arm64 (the default).
+            arch=arm64
+            if [[ "${{ matrix.platform }}" == macos-x86_64 ]]; then
+              arch=x86_64
+            fi
+            cc -O2 -fPIC -dynamiclib \
+              -Wall -Wextra -Wno-unused-parameter \
+              -arch "${arch}" \
+              -install_name "@loader_path/libonnx_native_shim.dylib" \
+              -I staged/include \
+              -L staged/lib -lonnxruntime \
+              -Wl,-rpath,@loader_path \
+              -o "${shim}" \
+              src/onnx_native_shim.c
+            otool -L "${shim}"
+          else
+            cc -O2 -fPIC -shared \
+              -Wall -Wextra -Wno-unused-parameter \
+              -I staged/include \
+              -L staged/lib -lonnxruntime \
+              -Wl,-rpath,'$ORIGIN' \
+              -o "${shim}" \
+              src/onnx_native_shim.c
+            ldd "${shim}" || true
+          fi
+
+          file "${shim}"
+
+      - name: Build shim (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          cl /LD /O2 /nologo /EHsc ^
+            /I staged\include ^
+            src\onnx_native_shim.c ^
+            /link /LIBPATH:staged\lib onnxruntime.lib ^
+            /OUT:staged\lib\libonnx_native_shim.dll
+
+      # --- Package tarball -----------------------------------------
+
+      - name: Package tarball (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p artefacts
+          out="artefacts/onnxruntime-${{ matrix.platform }}.tar.gz"
+          (cd staged && tar -czf "../${out}" lib include)
+          # Emit sha alongside so the release job can collect
+          # without re-hashing.
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            shasum -a 256 "${out}" > "${out}.sha256"
+          else
+            sha256sum "${out}" > "${out}.sha256"
+          fi
+          cat "${out}.sha256"
+
+      - name: Package zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artefacts | Out-Null
+          $out = "artefacts/onnxruntime-${{ matrix.platform }}.zip"
+          Compress-Archive -Path staged\lib, staged\include `
+                           -DestinationPath $out -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $out).Hash.ToLower()
+          "$hash  onnxruntime-${{ matrix.platform }}.zip" |
+            Out-File -FilePath "$out.sha256" -Encoding ascii
+          Get-Content "$out.sha256"
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-${{ matrix.platform }}
+          path: artefacts/
+          retention-days: 14
+
+  # Aggregate per-platform artefacts into a single GitHub Release
+  # with a combined checksums.txt asset.
+  release:
+    name: release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/binaries-') || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded/
+
+      - name: Flatten + generate combined checksums.txt + resolve tag
+        id: prep
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p release
+          find downloaded -type f \( \
+            -name 'onnxruntime-*.tar.gz' -o \
+            -name 'onnxruntime-*.zip' \
+          \) -exec cp {} release/ \;
+
+          cd release
+          sha256sum * | sort > ../checksums.txt
+          cd ..
+          echo "--- checksums.txt contents ---"
+          cat checksums.txt
+
+          # Source of truth: BINARY_TAG in the repo root. This
+          # also double-checks against the pushed tag for
+          # tag-push runs.
+          file_tag=$(cat BINARY_TAG | tr -d '[:space:]')
+          if [[ -z "$file_tag" ]]; then
+            echo "::error::BINARY_TAG file is empty or missing"
+            exit 1
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            pushed=${GITHUB_REF#refs/tags/}
+            if [[ "$pushed" != "$file_tag" ]]; then
+              echo "::error::Pushed tag '$pushed' doesn't match BINARY_TAG file '$file_tag'"
+              exit 1
+            fi
+          fi
+
+          echo "tag=$file_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Create / update GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.prep.outputs.tag }}
+          name: ${{ steps.prep.outputs.tag }}
+          files: |
+            release/*
+            checksums.txt
+          body: |
+            Prebuilt `onnx_native_shim` + `libonnxruntime` for
+            `${{ steps.prep.outputs.tag }}`.
+
+            `zef install ONNX::Native` downloads the tarball for
+            the host platform from this Release and stages it
+            under `$XDG_DATA_HOME/ONNX-Native/${{ steps.prep.outputs.tag }}/`.
+            See `Build.rakumod` for the install-time logic + env
+            overrides.
+
+            ## Verifying
+
+            ```
+            sha256sum -c checksums.txt
+            ```
+
+            ## After release
+
+            Copy `checksums.txt` contents into `resources/checksums.txt`
+            in the source tree + commit, then publish the next Raku
+            dist version. `Build.rakumod` treats the bundled
+            checksums as a hard security boundary — prebuilts whose
+            SHA256 isn't recorded will be refused.
+          draft: false
+          prerelease: false

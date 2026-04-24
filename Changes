@@ -1,0 +1,50 @@
+Revision history for ONNX::Native
+
+{{$NEXT}}
+
+0.1.0  2026-04-24T04:58:47+01:00
+    - Initial release.
+    - Minimal Raku NativeCall wrapper around ONNX Runtime's C API,
+      scoped to the inference surface SillyTavern's expressions
+      classifier exercises: env / session lifecycle, input/output
+      introspection, FLOAT32 / INT32 / INT64 tensor I/O, Run.
+    - C shim (src/onnx_native_shim.c, ~22 exported symbols) caches
+      the OrtApi* on first use and exposes flat extern-C wrappers,
+      avoiding per-call function-pointer dispatch on the Raku side.
+    - Class-based public API: `ONNX::Native::Session`,
+      `ONNX::Native::Tensor`, `ONNX::Native::TensorInfo`, enum
+      `DType`, enum `Provider`, exceptions under
+      `X::ONNX::Native::*`.
+    - Tensor inputs from Raku Blob (zero-copy via internal anchor),
+      flat Num / Int lists, or pre-packed bytes. Output tensors
+      decode to Num / Int lists or Blobs.
+    - Execution providers: CPU (all platforms) + CoreML baked into
+      Microsoft's macOS prebuilts. CUDA opt-in on Linux via
+      ONNX_NATIVE_WITH_CUDA=1. DirectML deferred.
+    - Build.rakumod downloads a per-platform tarball from this
+      repo's GitHub Release (SHA256-verified against bundled
+      resources/checksums.txt), stages it under
+      $XDG_DATA_HOME/ONNX-Native/<BINARY_TAG>/. Auto-fallbacks to
+      Microsoft's upstream ORT release (plus local shim compile)
+      when our Release has no artefact yet, and to system
+      libonnxruntime (brew / apt -dev package) when both fail.
+    - Windows path handling in the shim: UTF-8 char* at the Raku
+      boundary, widened via MultiByteToWideChar before calling
+      ORT's wchar_t-taking CreateSession. MSVC `cl` invocation
+      wired up in Build.rakumod's local-compile fallback path.
+    - Env knobs: ONNX_NATIVE_LIB_DIR, ONNX_NATIVE_BINARY_URL,
+      ONNX_NATIVE_BINARY_ONLY, ONNX_NATIVE_PREFER_SYSTEM,
+      ONNX_NATIVE_WITH_CUDA, ONNX_NATIVE_DATA_DIR,
+      ONNX_NATIVE_CACHE_DIR.
+    - New CI workflows: .github/workflows/build-binaries.yml
+      publishes prebuilt per-platform tarballs (macOS arm64/x86_64,
+      Linux x64/aarch64 glibc, Windows x64) on manual dispatch or
+      binaries-* tag push. .github/workflows/test.yml runs
+      `zef install .` + prove6 on Ubuntu / macOS / Windows for
+      every push and PR.
+    - Tests: t/01-ffi (shim smoke), t/02-session (public Session
+      API + error paths), t/03-inference (end-to-end round-trip
+      against a committed 124-byte add.onnx fixture). Fixture is
+      produced by a pure-Raku protobuf emitter
+      (t/fixtures/generate-add-onnx.raku) so regeneration has no
+      Python dependency.
