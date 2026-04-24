@@ -2,6 +2,81 @@ Revision history for ONNX::Native
 
 {{$NEXT}}
 
+0.1.1  2026-04-24T05:59:58+01:00
+    - Add windows-arm64 to the build-binaries.yml matrix.
+      Microsoft publishes onnxruntime-win-arm64-1.20.0.zip, and
+      the CRoaring / Tokenizers convention is to build for every
+      platform upstream supports. Uses the `windows-11-arm`
+      native ARM runner (falls back to cross-compile from
+      `windows-2022` with `amd64_arm64` if the runner isn't
+      accessible to the repo). %PLATFORM-SLUGS /
+      %UPSTREAM-SLUGS extended with the arm64 mapping.
+    - Linux shim link: reorder source file before -lonnxruntime.
+      Ubuntu's GCC defaults to --as-needed, which means a library
+      specified before any reference to its symbols gets dropped
+      from DT_NEEDED. With -lonnxruntime first and the source file
+      last, the link succeeded with undefined references to
+      OrtGetApiBase, which then failed at first dlopen. Sources
+      first is the universally-correct Unix linker order; this
+      just makes us correct.
+    - Linux shim link: switch from -Wl,--enable-new-dtags
+      (DT_RUNPATH) to -Wl,--disable-new-dtags (DT_RPATH). DT_RPATH
+      is searched BEFORE LD_LIBRARY_PATH by the Linux loader, so
+      a user with an older libonnxruntime in their LD_LIBRARY_PATH
+      (conda, vcpkg, distro package, IDE integration) can no
+      longer hijack our staged one. Shim is ABI-pinned against a
+      specific ORT_API_VERSION and must load the matching
+      libonnxruntime. macOS is already immune (@rpath/@loader_path
+      names bypass DYLD_LIBRARY_PATH) and Windows is fixed via
+      SetDllDirectoryW. Users who genuinely want to override
+      should use the explicit ONNX_NATIVE_LIB_DIR env var.
+    - New .github/workflows/glibc-fallback.yml: runs `zef install .`
+      inside an ubuntu:20.04 container (glibc 2.31, below MIN-GLIBC
+      2.35) and asserts (a) BINARY_ONLY=1 fails cleanly naming
+      glibc, and (b) the default path shows the fallback message
+      and attempts the system-libonnxruntime path. Matches
+      CRoaring's glibc-fallback.yml structure.
+    - MIN-GLIBC bumped from 2.31 to 2.35 (ubuntu-22.04 baseline)
+      to match CRoaring / Tokenizers convention: if a user's host
+      glibc is below the CI build-host's glibc, trust the
+      fallback path rather than a prebuilt that *might* work.
+      ubuntu:18.04 can't run actions/checkout (Node 20 requires
+      glibc 2.28+) so the old plan of testing at 2.27 wasn't
+      viable anyway.
+    - Windows DLL search: FFI.rakumod now steers the Win32
+      loader to our staged onnxruntime.dll via PATH prepend +
+      SetDllDirectoryW (kernel32) before the shim's LoadLibrary
+      resolves. Without this, Windows resolves the shim's
+      import-lib'd `onnxruntime.dll` using the process-exe's
+      directory (raku.exe), which on GitHub's windows-latest
+      runner picks up a 1.17.1 DLL installed system-wide — our
+      shim is compiled against ORT_API_VERSION=20, that older
+      DLL only supports versions 1 and 17, and every call died
+      with "The requested API version [20] is not available".
+      Matches Vips-Native's existing fix for the same class of
+      Windows loader problem.
+    - Windows shim: add ONNX_SHIM_EXPORT macro (__declspec(dllexport)
+      on Windows, visibility("default") elsewhere) on every shim
+      function definition. MSVC doesn't export DLL symbols by
+      default, so without this the shim loaded on Windows but every
+      `is native` binding failed with "Cannot locate symbol".
+    - Linux shim: compile with -Wl,--no-undefined and
+      -Wl,--enable-new-dtags. GCC's default for -shared silently
+      allows unresolved references, so a missing -lonnxruntime
+      produced a shim that only failed at first dlopen with
+      "undefined symbol: OrtGetApiBase". --no-undefined turns that
+      into a loud link-time error; --enable-new-dtags emits
+      RUNPATH (overridable via LD_LIBRARY_PATH) rather than legacy
+      RPATH.
+    - macOS shim: explicit -Wl,-undefined,error for
+      defense-in-depth (already the default but pinning it
+      prevents future regressions via env-level flags).
+    - Build.rakumod now runs platform-native linkage diagnostics
+      after a successful shim compile (`ldd` + `readelf -d` on
+      Linux, `otool -L` + `nm -g` on macOS, `dumpbin /dependents`
+      + `/exports` on Windows) so CI logs show the NEEDED /
+      RUNPATH / exports directly.
+
 0.1.0  2026-04-24T04:58:47+01:00
     - Initial release.
     - Minimal Raku NativeCall wrapper around ONNX Runtime's C API,

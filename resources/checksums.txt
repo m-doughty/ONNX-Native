@@ -15,12 +15,14 @@
 # boundary: any tarball whose sha doesn't match is refused before
 # extraction.
 #
-# These hashes are for binaries-onnxruntime-1.20.0-r2, produced
-# by the first Release that includes the windows-arm64 variant.
+# These hashes are for binaries-onnxruntime-1.20.0-r3 — the
+# Linux shims were rebuilt with -Wl,--disable-new-dtags to emit
+# DT_RPATH instead of DT_RUNPATH, so a user's LD_LIBRARY_PATH
+# can no longer hijack the staged libonnxruntime.
 
-f0af11fd59e5837309aa2573f928cb7b5a26657a6cdfd4522f85d9dc216f4234  onnxruntime-macos-arm64.tar.gz
-a87cd2ff08d544ab105d1ecc6def892a784d06db3b63f03f605f451b2d2f8fb7  onnxruntime-macos-x86_64.tar.gz
-21e814fbc4c4ae91f80ddcdb34c12e2c6e78e9b2254a2f6fae9384bea46c6310  onnxruntime-linux-x86_64-glibc.tar.gz
-9a02d6eff056bce256adf62fd673499945fccd1182adef2ab6cf30df9e11a6de  onnxruntime-linux-aarch64-glibc.tar.gz
-09fa990a4288b633a2ba56c4390c7b9cef1c5a1c76495daebb69fe2096b55a06  onnxruntime-windows-x86_64.zip
-f1bea58ee9fdebe66701c93bc05391814eb5f037c7849f90750e7f26ba0b47db  onnxruntime-windows-arm64.zip
+c421c74df0271617e7ff04d855785ee16b803ca480b4beb48842c41aaad6f582  onnxruntime-macos-arm64.tar.gz
+8c61e8ff165f86f40ed272753222debdd625ecfb9f9773d9f5ad3054a67611d0  onnxruntime-macos-x86_64.tar.gz
+5fdeaa267892c141fb00733f205223158d7937afa6145970a5242f964ded5723  onnxruntime-linux-x86_64-glibc.tar.gz
+4f5bd32da3211efd7a194b92524739036ddabc5e8086bc3d2fe5e7ce4054bf05  onnxruntime-linux-aarch64-glibc.tar.gz
+80b2fe2e524f2e988a9fd75f3e2c374b5fa70daedda65d9e8e2898d5d3955040  onnxruntime-windows-x86_64.zip
+7b44bf1a6d21e9e2a4ff397cb0904179cf973e57109a8f6471ef08b4be1d40ee  onnxruntime-windows-arm64.zip
