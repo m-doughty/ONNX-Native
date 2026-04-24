@@ -473,18 +473,25 @@ class Build {
 		my @cmd;
 		given $os {
 			when /darwin/ {
-				# -Wl,-undefined,error: default on macOS but set
-				# it explicitly so a future env-level override
-				# can't sneak in a lenient link.
+				# Source file goes before `-lonnxruntime` — Unix
+				# linker etiquette: objects first, libraries last.
+				# Matters on Linux (GNU ld's `--as-needed`
+				# default drops unused libs from NEEDED before
+				# it's seen references to their symbols); macOS
+				# ld is less picky but the rule's universal.
+				#
+				# Not setting -undefined,error explicitly — that's
+				# the default on Apple ld, and the newer linker
+				# warns about it being deprecated.
 				@cmd = 'cc', '-O2', '-fPIC', '-dynamiclib',
 					'-Wall', '-Wextra', '-Wno-unused-parameter',
 					'-install_name', "\@loader_path/$shim-name",
 					'-I', $include-dir.Str,
+					$src,
 					'-L', $link-dir.Str,
 					'-lonnxruntime',
 					'-Wl,-rpath,@loader_path',
-					'-Wl,-undefined,error',
-					'-o', $shim.Str, $src;
+					'-o', $shim.Str;
 				@cmd.splice(2, 0, '-DONNX_SHIM_WITH_CUDA=1') if $with-cuda;
 			}
 			when $*DISTRO.is-win {
@@ -511,28 +518,36 @@ class Build {
 				@cmd.splice(4, 0, '/DONNX_SHIM_WITH_CUDA=1') if $with-cuda;
 			}
 			default {
-				# -Wl,--no-undefined: GCC's default for `-shared`
-				# is to let undefined references slide at link
-				# time and fail at dlopen. That turns a missing
-				# `-lonnxruntime` resolve into a runtime
-				# "undefined symbol: OrtGetApiBase" at first load
-				# — which is miserable to diagnose. --no-undefined
-				# flips that to a hard link error instead.
+				# CRITICAL: source file must come BEFORE
+				# `-lonnxruntime`. Modern GNU ld on Ubuntu / Debian
+				# defaults to `--as-needed`, which only adds a
+				# DT_NEEDED entry for a library if some symbol
+				# from it has already been referenced. With
+				# `-lonnxruntime` first and the source file last,
+				# the linker sees the library before any
+				# references to OrtGetApiBase, decides nothing
+				# needs it, and drops it from the link set —
+				# then fails with "undefined reference" when it
+				# finally reads the source file.
 				#
-				# --enable-new-dtags makes the `-Wl,-rpath` we set
-				# emit a RUNPATH entry (searched after LD_LIBRARY_PATH)
-				# rather than the legacy RPATH (searched before).
-				# Matters for users who explicitly override via
-				# LD_LIBRARY_PATH — their override wins.
+				# -Wl,--no-undefined: turns GCC's default-silent
+				# -shared into a loud link-time error if
+				# anything's unresolved. Catches missing libs
+				# pre-dlopen rather than post.
+				#
+				# -Wl,--enable-new-dtags: emit RUNPATH (honours
+				# LD_LIBRARY_PATH override) rather than legacy
+				# RPATH.
 				@cmd = 'cc', '-O2', '-fPIC', '-shared',
 					'-Wall', '-Wextra', '-Wno-unused-parameter',
 					'-I', $include-dir.Str,
+					$src,
 					'-L', $link-dir.Str,
 					'-lonnxruntime',
 					'-Wl,-rpath,$ORIGIN',
 					'-Wl,--enable-new-dtags',
 					'-Wl,--no-undefined',
-					'-o', $shim.Str, $src;
+					'-o', $shim.Str;
 				@cmd.splice(2, 0, '-DONNX_SHIM_WITH_CUDA=1') if $with-cuda;
 			}
 		}

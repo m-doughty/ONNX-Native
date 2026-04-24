@@ -1,0 +1,110 @@
+name: glibc-fallback
+
+# Verifies that Build.rakumod's glibc version check correctly
+# identifies an old-glibc system and refuses to use Microsoft's
+# Linux ONNX Runtime prebuilt (which is built against a newer
+# glibc and would fail at first symbol use with "GLIBC_2.xx not
+# found").
+#
+# We run in an ubuntu:18.04 container (glibc 2.27) — just below
+# the $MIN-GLIBC constant in Build.rakumod (2.31, matching
+# Microsoft's stated build target of Ubuntu 20.04). GitHub
+# dropped ubuntu-18.04 runners but the container image still
+# pulls; that's all we need for a glibc check.
+
+on:
+  push:
+    branches:
+      - '*'
+    tags-ignore:
+      - '*'
+  pull_request:
+
+jobs:
+  old-glibc-fallback:
+    name: Ubuntu 18.04 (glibc 2.27) → fallback path
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:18.04
+    # Containers default to /bin/sh (dash) — force bash for
+    # pipefail and process substitution.
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install system deps
+        run: |
+          apt-get update
+          # Bionic's `rakudo` package is stale; setup-raku below
+          # pulls a current Rakudo prebuilt (which happens to run
+          # fine on glibc 2.27 — verified empirically). The only
+          # reason we're in an 18.04 container is to exercise the
+          # glibc detection path against its oldest target.
+          apt-get install -y --no-install-recommends \
+              build-essential curl ca-certificates git xz-utils \
+              libssl1.1
+          ldd --version
+
+      - uses: actions/checkout@v4
+
+      - uses: Raku/setup-raku@v1
+        with:
+          raku-version: 'latest'
+
+      # Case 1: BINARY_ONLY=1 on old glibc → must die cleanly with
+      # the glibc-mismatch message. There's no fallback that can
+      # save this combination; we just need the error to be
+      # understandable rather than a mystery "GLIBC_2.xx not
+      # found" at dlopen.
+      - name: Install with BINARY_ONLY=1 (expect hard fail)
+        id: binary-only
+        env:
+          ONNX_NATIVE_BINARY_ONLY: '1'
+        run: |
+          set +e
+          zef install --/test --verbose . 2>&1 | tee build-binary-only.log
+          rc=${PIPESTATUS[0]}
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          # We EXPECT this to fail. Propagate success-on-failure.
+          if [[ $rc -ne 0 ]]; then
+            echo "✅ zef install failed as expected under BINARY_ONLY=1"
+            exit 0
+          fi
+          echo "❌ Expected failure but install succeeded"
+          exit 1
+
+      - name: Assert BINARY_ONLY error names glibc
+        run: |
+          if ! grep -iF 'glibc' build-binary-only.log; then
+            echo "::error::Expected build-binary-only.log to mention glibc mismatch"
+            echo "---- tail ----"
+            tail -60 build-binary-only.log
+            exit 1
+          fi
+          echo "✅ Error message correctly identifies glibc as the cause"
+
+      # Case 2: default settings on old glibc → Build.rakumod
+      # should detect, note the glibc mismatch, and try the
+      # system-libonnxruntime fallback. In a bare ubuntu:18.04
+      # container there IS no system libonnxruntime, so this
+      # still fails, but it should fail further down the chain
+      # and the log should show the fallback message.
+      - name: Install default (expect fallback attempt)
+        id: default
+        run: |
+          set +e
+          zef install --/test --verbose . 2>&1 | tee build-default.log
+          rc=${PIPESTATUS[0]}
+          echo "Exit code: $rc (expected non-zero since no system ORT is installed)"
+
+      - name: Assert fallback message appeared
+        run: |
+          if ! grep -iE 'falling back to system libonnxruntime|glibc.*older than prebuilt' build-default.log; then
+            echo "::error::Expected the glibc-fallback message in the build log"
+            echo "---- tail ----"
+            tail -80 build-default.log
+            exit 1
+          fi
+          echo "✅ Build.rakumod correctly noted the glibc mismatch and attempted the system-ORT fallback"

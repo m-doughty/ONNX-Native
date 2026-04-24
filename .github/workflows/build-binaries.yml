@@ -145,36 +145,43 @@ jobs:
             if [[ "${{ matrix.platform }}" == macos-x86_64 ]]; then
               arch=x86_64
             fi
+            # Source file BEFORE `-lonnxruntime` — see the Linux
+            # comment below for the ordering rationale (macOS ld
+            # is less picky but the rule is the same).
             cc -O2 -fPIC -dynamiclib \
               -Wall -Wextra -Wno-unused-parameter \
               -arch "${arch}" \
               -install_name "@loader_path/libonnx_native_shim.dylib" \
               -I staged/include \
+              src/onnx_native_shim.c \
               -L staged/lib -lonnxruntime \
               -Wl,-rpath,@loader_path \
-              -Wl,-undefined,error \
-              -o "${shim}" \
-              src/onnx_native_shim.c
+              -o "${shim}"
             echo '--- otool -L ---'
             otool -L "${shim}"
             echo '--- exported symbols ---'
             nm -g "${shim}" | grep -i onnx_shim | head -30 || true
           else
-            # --no-undefined: GCC's default for -shared lets
-            # undefined refs survive the link. If -lonnxruntime
-            # doesn't resolve, we want a loud link-time error
-            # rather than a silent "undefined symbol: OrtGetApiBase"
-            # at first dlopen. --enable-new-dtags emits RUNPATH
-            # so LD_LIBRARY_PATH still wins for user overrides.
+            # CRITICAL: source file BEFORE `-lonnxruntime`. GNU ld
+            # defaults to --as-needed on Ubuntu / Debian; with the
+            # library first the linker sees no references to its
+            # symbols yet, decides nothing needs it, and drops it
+            # from DT_NEEDED — producing "undefined reference to
+            # OrtGetApiBase" when the source is finally read.
+            #
+            # --no-undefined turns GCC's default-silent -shared
+            # link into a loud link-time error on unresolved refs.
+            # --enable-new-dtags emits RUNPATH (LD_LIBRARY_PATH
+            # override still wins) rather than legacy RPATH.
             cc -O2 -fPIC -shared \
               -Wall -Wextra -Wno-unused-parameter \
               -I staged/include \
+              src/onnx_native_shim.c \
               -L staged/lib -lonnxruntime \
               -Wl,-rpath,'$ORIGIN' \
               -Wl,--enable-new-dtags \
               -Wl,--no-undefined \
-              -o "${shim}" \
-              src/onnx_native_shim.c
+              -o "${shim}"
             echo '--- ldd ---'
             ldd "${shim}" || true
             echo '--- readelf NEEDED / RUNPATH ---'
