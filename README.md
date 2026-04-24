@@ -1,3 +1,5 @@
+[![Actions Status](https://github.com/m-doughty/ONNX-Native/actions/workflows/test.yml/badge.svg)](https://github.com/m-doughty/ONNX-Native/actions)
+
 NAME
 ====
 

@@ -177,24 +177,31 @@ jobs:
             echo '--- exported symbols ---'
             nm -g "${shim}" | grep -i onnx_shim | head -30 || true
           else
-            # CRITICAL: source file BEFORE `-lonnxruntime`. GNU ld
-            # defaults to --as-needed on Ubuntu / Debian; with the
-            # library first the linker sees no references to its
-            # symbols yet, decides nothing needs it, and drops it
-            # from DT_NEEDED — producing "undefined reference to
-            # OrtGetApiBase" when the source is finally read.
+            # CRITICAL: source BEFORE `-lonnxruntime` (--as-needed
+            # is Ubuntu's default for -shared). Library first +
+            # source last = libonnxruntime gets dropped from
+            # DT_NEEDED before its symbols are referenced, then
+            # fails "undefined reference to OrtGetApiBase".
             #
-            # --no-undefined turns GCC's default-silent -shared
-            # link into a loud link-time error on unresolved refs.
-            # --enable-new-dtags emits RUNPATH (LD_LIBRARY_PATH
-            # override still wins) rather than legacy RPATH.
+            # --no-undefined: turn the default-silent -shared link
+            # into a loud link-time error on unresolved refs.
+            #
+            # --disable-new-dtags: emit DT_RPATH not DT_RUNPATH.
+            # DT_RPATH is searched BEFORE LD_LIBRARY_PATH, so a
+            # user with an older libonnxruntime in LD_LIBRARY_PATH
+            # (vcpkg / conda / distro) can't hijack our staged
+            # one. Shim is compiled against a specific
+            # ORT_API_VERSION — ABI mismatch with a hijacked lib
+            # surfaces as "The requested API version [N] is not
+            # available" at first call. ONNX_NATIVE_LIB_DIR is
+            # the intended override mechanism.
             cc -O2 -fPIC -shared \
               -Wall -Wextra -Wno-unused-parameter \
               -I staged/include \
               src/onnx_native_shim.c \
               -L staged/lib -lonnxruntime \
               -Wl,-rpath,'$ORIGIN' \
-              -Wl,--enable-new-dtags \
+              -Wl,--disable-new-dtags \
               -Wl,--no-undefined \
               -o "${shim}"
             echo '--- ldd ---'

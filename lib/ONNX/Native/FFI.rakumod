@@ -81,6 +81,69 @@ sub _resolve-shim(--> Str) {
 	'onnx_native_shim';
 }
 
+#| Pick the directory containing the libs we want the OS loader to
+#| prefer. Same order as _resolve-shim but returns the *dir*, not
+#| the shim file — needed on Windows so we can steer the DLL
+#| search path to our staged onnxruntime.dll before it's resolved.
+sub _resolve-lib-dir(--> IO::Path) {
+	if (my $override = %*ENV<ONNX_NATIVE_LIB_DIR>) && $override.IO.d {
+		return $override.IO;
+	}
+	my $staged = _staged-lib-dir();
+	return $staged if $staged.defined && $staged.d;
+	IO::Path;
+}
+
+#| Runtime env setup. On Windows, loading the shim triggers a
+#| LoadLibrary of its import-lib'd onnxruntime.dll — and Windows
+#| resolves that via the *process executable's* directory
+#| (raku.exe), NOT the shim's own directory. If the GitHub
+#| runner / user's machine has a different onnxruntime.dll
+#| anywhere on PATH or in System32 (vcpkg, DirectML SDK,
+#| ML.NET install — version 1.17.1 on GitHub's windows-latest
+#| runner at time of writing), that unrelated DLL wins and our
+#| shim tries to call ORT_API_VERSION 20 into an API that only
+#| supports versions 1 and 17.
+#|
+#| Fix: tell the Windows loader to also check our staged dir.
+#| Belt + braces:
+#|   1. Prepend to PATH so any DLL search that consults it
+#|      (including subprocess spawns) finds our copy first.
+#|   2. SetDllDirectoryW via kernel32 so the Win32 loader sees
+#|      our staged dir regardless of CRT-vs-kernel32 env split.
+#|      This is exactly what Vips-Native does — same problem,
+#|      same fix.
+#|
+#| No-op on macOS/Linux — @loader_path / $ORIGIN (baked into the
+#| shim at link time) handles sibling-lib lookup natively.
+sub _configure-runtime-env() {
+	return unless $*DISTRO.is-win;
+
+	my $lib-dir = _resolve-lib-dir();
+	return without $lib-dir;
+	return unless $lib-dir.d;
+	my $lib-str = $lib-dir.Str;
+
+	# Belt: PATH prepend.
+	my $current = %*ENV<PATH> // '';
+	unless $current.starts-with("$lib-str;") || $current eq $lib-str {
+		%*ENV<PATH> = "$lib-str;$current";
+	}
+
+	# Braces: SetDllDirectoryW. kernel32.dll is pre-loaded in
+	# every Windows process, so `is native('kernel32')` resolves
+	# cheaply without a disk probe. The W (wide) variant takes
+	# UTF-16LE; Raku's `utf16` encoding marshals to that on every
+	# LE Windows target we support. SetDllDirectory semantics:
+	# replaces the *single* extra DLL-search entry Win32 supports
+	# (not additive). This module is the only thing in the
+	# process that touches it, so replace is fine.
+	my sub SetDllDirectoryW(Str is encoded('utf16'))
+		returns int32 is native('kernel32') { * };
+	SetDllDirectoryW($lib-str);
+}
+_configure-runtime-env();
+
 constant $shim-lib is export = _resolve-shim();
 
 # === Opaque handle types ===

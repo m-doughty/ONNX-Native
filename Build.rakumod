@@ -72,9 +72,17 @@ class Build {
 	constant $UPSTREAM-ARTIFACT-PATTERN = 'onnxruntime-%s-%s.%s';
 
 	#| Minimum glibc the prebuilt Linux archives are compatible with.
-	#| Microsoft's ORT Linux prebuilts target Ubuntu 20.04's glibc
-	#| 2.31 since ORT 1.18+. Bump in lockstep with upstream.
-	constant $MIN-GLIBC = v2.31;
+	#| Set conservatively to 2.35 (ubuntu-22.04's glibc) — matches
+	#| the CRoaring / Tokenizers convention of "if a user's on an
+	#| older glibc than the CI build host, trust the fallback path
+	#| rather than a prebuilt that might-or-might-not work".
+	#|
+	#| Microsoft's ORT 1.20 binaries technically only require
+	#| GLIBC_2.27 per objdump, so users on ubuntu-20.04 (glibc
+	#| 2.31) would probably be fine with the prebuilt — but we'd
+	#| rather be conservative and fall back to system
+	#| libonnxruntime than ship them a time-bomb.
+	constant $MIN-GLIBC = v2.35;
 
 	#| Map (OS, hardware) → OUR artefact platform slug. These
 	#| match the `matrix.platform` values in
@@ -521,26 +529,36 @@ class Build {
 				@cmd.splice(4, 0, '/DONNX_SHIM_WITH_CUDA=1') if $with-cuda;
 			}
 			default {
-				# CRITICAL: source file must come BEFORE
-				# `-lonnxruntime`. Modern GNU ld on Ubuntu / Debian
-				# defaults to `--as-needed`, which only adds a
-				# DT_NEEDED entry for a library if some symbol
-				# from it has already been referenced. With
-				# `-lonnxruntime` first and the source file last,
-				# the linker sees the library before any
-				# references to OrtGetApiBase, decides nothing
-				# needs it, and drops it from the link set —
-				# then fails with "undefined reference" when it
-				# finally reads the source file.
+				# CRITICAL: source file BEFORE `-lonnxruntime`.
+				# GNU ld's `--as-needed` (Ubuntu / Debian default)
+				# only adds a DT_NEEDED entry for a library if some
+				# symbol from it has already been referenced. With
+				# the library first and the source file last, the
+				# linker sees libonnxruntime before any reference
+				# to OrtGetApiBase, decides nothing needs it, and
+				# drops it — then fails "undefined reference"
+				# when it finally reads the source file.
 				#
-				# -Wl,--no-undefined: turns GCC's default-silent
-				# -shared into a loud link-time error if
-				# anything's unresolved. Catches missing libs
-				# pre-dlopen rather than post.
+				# -Wl,--no-undefined: turn GCC's default-silent
+				# -shared into a loud link-time error on
+				# unresolved refs. Catches missing libs pre-dlopen.
 				#
-				# -Wl,--enable-new-dtags: emit RUNPATH (honours
-				# LD_LIBRARY_PATH override) rather than legacy
-				# RPATH.
+				# -Wl,--disable-new-dtags: emit DT_RPATH rather
+				# than DT_RUNPATH. Matters for lib-identity: the
+				# Linux loader searches DT_RPATH entries BEFORE
+				# LD_LIBRARY_PATH, but DT_RUNPATH AFTER. A user
+				# with an older libonnxruntime in LD_LIBRARY_PATH
+				# (vcpkg, conda, distro package) would hijack our
+				# staged one with DT_RUNPATH. DT_RPATH guarantees
+				# our staged dylib always wins. Users who genuinely
+				# want to override should use the explicit
+				# ONNX_NATIVE_LIB_DIR env var, not LD_LIBRARY_PATH.
+				#
+				# (Note: modern GNU ld style prefers DT_RUNPATH for
+				# flexibility. We deliberately opt out for ABI
+				# safety — the shim is compiled against a specific
+				# ORT_API_VERSION and must load the matching
+				# libonnxruntime.)
 				@cmd = 'cc', '-O2', '-fPIC', '-shared',
 					'-Wall', '-Wextra', '-Wno-unused-parameter',
 					'-I', $include-dir.Str,
@@ -548,7 +566,7 @@ class Build {
 					'-L', $link-dir.Str,
 					'-lonnxruntime',
 					'-Wl,-rpath,$ORIGIN',
-					'-Wl,--enable-new-dtags',
+					'-Wl,--disable-new-dtags',
 					'-Wl,--no-undefined',
 					'-o', $shim.Str;
 				@cmd.splice(2, 0, '-DONNX_SHIM_WITH_CUDA=1') if $with-cuda;
