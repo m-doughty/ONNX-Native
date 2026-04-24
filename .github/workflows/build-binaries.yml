@@ -65,10 +65,22 @@ jobs:
             ort-artifact: onnxruntime-linux-aarch64
             lib-ext: so
 
-          # Windows x86_64 — MSVC via ilammy/msvc-dev-cmd.
+          # Windows x86_64 — MSVC via ilammy/msvc-dev-cmd on the
+          # standard x64 runner.
           - os: windows-2022
             platform: windows-x86_64
             ort-artifact: onnxruntime-win-x64
+            lib-ext: dll
+
+          # Windows arm64 — native ARM64 runner + MSVC for arm64.
+          # Microsoft publishes onnxruntime-win-arm64-<ver>.zip.
+          # If `windows-11-arm` isn't available to the repo yet,
+          # swap back to `windows-2022` with `arch: amd64_arm64`
+          # in the msvc-dev-cmd step below to cross-compile from
+          # x64.
+          - os: windows-11-arm
+            platform: windows-arm64
+            ort-artifact: onnxruntime-win-arm64
             lib-ext: dll
 
     runs-on: ${{ matrix.os }}
@@ -125,7 +137,10 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: amd64
+          # Native toolchain per runner: amd64 on windows-2022,
+          # arm64 on windows-11-arm. If windows-11-arm isn't
+          # available, flip to `amd64_arm64` for cross-compile.
+          arch: ${{ matrix.platform == 'windows-arm64' && 'arm64' || 'amd64' }}
 
       # --- Build shim ----------------------------------------------
 

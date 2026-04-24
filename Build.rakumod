@@ -87,6 +87,8 @@ class Build {
 		'linux-aarch64'   => 'linux-aarch64-glibc',
 		'win32-x86_64'    => 'windows-x86_64',
 		'mswin32-x86_64'  => 'windows-x86_64',
+		'win32-aarch64'   => 'windows-arm64',
+		'mswin32-aarch64' => 'windows-arm64',
 	;
 
 	#| When pointing Build at Microsoft's upstream URL as a dev
@@ -99,6 +101,7 @@ class Build {
 		'linux-x86_64-glibc'     => 'linux-x64',
 		'linux-aarch64-glibc'    => 'linux-aarch64',
 		'windows-x86_64'         => 'win-x64',
+		'windows-arm64'          => 'win-arm64',
 	;
 
 	# --- Entry point ----------------------------------------------------
