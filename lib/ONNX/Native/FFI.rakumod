@@ -144,7 +144,21 @@ sub _configure-runtime-env() {
 }
 _configure-runtime-env();
 
-constant $shim-lib is export = _resolve-shim();
+# Library-path resolver. State-cached sub rather than a `constant`
+# binding: `constant X = _resolve-shim()` evaluates at compile time
+# and bakes the resolved path into the precompiled bytecode, and
+# Rakudo doesn't track `resources/BINARY_TAG` as a precomp
+# dependency. A BINARY_TAG bump (which moves staged libs to a new
+# versioned directory and may GC the previous one) would leave the
+# precomp pointing at the old path — producing "Cannot locate
+# native library" errors on freshly installed packages until the
+# user nuked `~/.raku/precomp/`. Deferring resolution to first
+# sub-call means each process picks up the current tag, regardless
+# of when the precomp was built. `state $r` caches the result so
+# the lookup is O(1) after the first call. Pair with
+# `is native(&shim-lib)` on each binding (not `is native(&shim-lib)`)
+# so NativeCall invokes the resolver lazily.
+sub shim-lib is export { state $r = _resolve-shim(); $r }
 
 # === Opaque handle types ===
 #
@@ -207,7 +221,17 @@ constant ORT_EP_FAIL           is export = 11;
 # === Shim bindings ===
 
 sub onnx_shim_api_version(--> int32)
-	is native($shim-lib) is export { * };
+	is native(&shim-lib) is export { * };
+
+# Returns a pointer into libonnxruntime's static rodata (the
+# version string baked into the shared lib at build time). The
+# shim does NOT allocate or own this buffer; the caller MUST NOT
+# free it. Modelled here as Str — NativeCall decodes the returned
+# char* into a fresh Raku Str, so the Raku-side string is
+# independent of the underlying C memory. NULL → Str type object
+# (libonnxruntime unavailable).
+sub onnx_shim_runtime_version_string(--> Str)
+	is native(&shim-lib) is export { * };
 
 # --- Env ---
 
@@ -216,10 +240,10 @@ sub onnx_shim_init(
 	CArray[OrtEnvHandle],      # *OrtEnv** out_env
 	CArray[Pointer[uint8]],    # out_error
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_release_env(OrtEnvHandle)
-	is native($shim-lib) is export { * };
+	is native(&shim-lib) is export { * };
 
 # --- Session options ---
 
@@ -227,10 +251,10 @@ sub onnx_shim_create_session_options(
 	CArray[OrtSessionOptionsHandle],
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_release_session_options(OrtSessionOptionsHandle)
-	is native($shim-lib) is export { * };
+	is native(&shim-lib) is export { * };
 
 sub onnx_shim_enable_provider(
 	OrtSessionOptionsHandle,
@@ -238,7 +262,7 @@ sub onnx_shim_enable_provider(
 	int64,                     # flags
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 # --- Session ---
 
@@ -249,7 +273,7 @@ sub onnx_shim_create_session_from_path(
 	CArray[OrtSessionHandle],
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_create_session_from_buffer(
 	OrtEnvHandle,
@@ -259,10 +283,10 @@ sub onnx_shim_create_session_from_buffer(
 	CArray[OrtSessionHandle],
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_release_session(OrtSessionHandle)
-	is native($shim-lib) is export { * };
+	is native(&shim-lib) is export { * };
 
 # --- Introspection ---
 
@@ -271,14 +295,14 @@ sub onnx_shim_session_input_count(
 	CArray[size_t],
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_session_output_count(
 	OrtSessionHandle,
 	CArray[size_t],
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_session_input_name(
 	OrtSessionHandle,
@@ -286,7 +310,7 @@ sub onnx_shim_session_input_name(
 	CArray[Pointer[uint8]],    # out_name (malloc'd)
 	CArray[Pointer[uint8]],    # out_error
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_session_output_name(
 	OrtSessionHandle,
@@ -294,10 +318,10 @@ sub onnx_shim_session_output_name(
 	CArray[Pointer[uint8]],
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_free_name(Pointer[uint8])
-	is native($shim-lib) is export { * };
+	is native(&shim-lib) is export { * };
 
 sub onnx_shim_session_input_type_info(
 	OrtSessionHandle,
@@ -308,7 +332,7 @@ sub onnx_shim_session_input_type_info(
 	size_t,                    # shape_cap
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_session_output_type_info(
 	OrtSessionHandle,
@@ -319,7 +343,7 @@ sub onnx_shim_session_output_type_info(
 	size_t,
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 # --- Tensors ---
 
@@ -332,10 +356,10 @@ sub onnx_shim_create_tensor(
 	CArray[OrtValueHandle],
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_release_value(OrtValueHandle)
-	is native($shim-lib) is export { * };
+	is native(&shim-lib) is export { * };
 
 sub onnx_shim_tensor_shape(
 	OrtValueHandle,
@@ -345,7 +369,7 @@ sub onnx_shim_tensor_shape(
 	size_t,
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 sub onnx_shim_tensor_data(
 	OrtValueHandle,
@@ -353,7 +377,7 @@ sub onnx_shim_tensor_data(
 	CArray[size_t],            # out_byte_len
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 # --- Run ---
 
@@ -367,12 +391,12 @@ sub onnx_shim_run(
 	size_t,                    # num_outputs
 	CArray[Pointer[uint8]],
 	--> int32
-) is native($shim-lib) is export { * };
+) is native(&shim-lib) is export { * };
 
 # --- Error helper ---
 
 sub onnx_shim_free_error(Pointer[uint8])
-	is native($shim-lib) is export { * };
+	is native(&shim-lib) is export { * };
 
 # === Helpers for callers ===
 

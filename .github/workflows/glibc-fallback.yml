@@ -43,7 +43,7 @@ jobs:
               build-essential curl ca-certificates git
           ldd --version
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: Raku/setup-raku@v1
         with:

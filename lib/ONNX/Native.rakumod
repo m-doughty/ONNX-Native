@@ -22,6 +22,67 @@ sub throw-ffi-error(Int $code, Str $reason) {
 # shape, and allocating it via the FFI helper keeps the type in
 # one place.
 
+# Auto-grow shape-fetch protocol — implements the contract
+# documented in onnx_native_shim.h: the shim writes the *true*
+# rank into out_rank and up to shape_cap dims into out_shape, so
+# if cap < rank the caller must re-allocate and call again. We
+# start with a generous cap (16 covers every realistic model) and
+# retry once at the exact rank if the model is deeper.
+#
+# &caller is invoked as: caller($shape-out, $cap, $err) and must
+# return ($rc, $rank, $elem-int). It decides which underlying
+# shim function to call (input vs output type info, or
+# tensor_shape on an OrtValue).
+#
+# Returns (@shape, $elem-int) on success; throws on failure with
+# the given $context as part of the error message.
+sub fetch-shape-with-cap(&caller, Str $context --> List) {
+	my int $cap = 16;
+	my $err;
+	my $rc;
+	my $rank;
+	my $elem-int;
+	my $shape-out;
+	loop {
+		$shape-out = CArray[int64].new;
+		$shape-out[$_] = 0 for ^$cap;
+		$err = err-slot();
+		($rc, $rank, $elem-int) = caller($shape-out, $cap, $err);
+		unless $rc == ORT_OK {
+			my $msg = ffi-extract-error($err) // 'unknown error';
+			throw-ffi-error($rc, "$context: $msg");
+		}
+		last if $rank <= $cap;
+		# Model has more dims than our buffer fit. Resize to the
+		# exact rank ORT reported and call once more — the next
+		# iteration is guaranteed to succeed since we're allocating
+		# the precise rank.
+		$cap = $rank;
+	}
+	my @shape = (^$rank).map({ $shape-out[$_].Int });
+	(@shape, $elem-int);
+}
+
+# === Diagnostics ===
+
+#| ORT_API_VERSION the shim was compiled against. Pairs with
+#| runtime-version() — the two should be coherent. If they're
+#| not (e.g. a user-supplied libonnxruntime is older than the
+#| API the shim expects), inference will fail at session
+#| creation with a "requested API version not available" error,
+#| and these two helpers let callers report the mismatch.
+sub api-version(--> Int) is export {
+	onnx_shim_api_version().Int;
+}
+
+#| Loaded libonnxruntime's version string (e.g. "1.20.1"), as
+#| reported by ORT itself. Returns Str (type object) if the
+#| shared lib couldn't be loaded — usually a sign the staged
+#| binaries are missing or unreadable.
+sub runtime-version(--> Str) is export {
+	onnx_shim_runtime_version_string();
+}
+
 # === Session ===
 
 class Session is export {
@@ -49,13 +110,30 @@ class Session is export {
 	#| Load a model from disk. `:@providers` is tried in the order
 	#| given; the first registered provider handles any given op
 	#| (falls back to CPU for unsupported ops).
+	#|
+	#| Per-provider tuning is exposed via dedicated named args:
+	#|
+	#| =item :cuda-device-id  — integer GPU index (default 0). Only
+	#|     consulted when CUDA is in `@providers`. With multiple
+	#|     CUDA cards this picks which one ORT runs on.
+	#| =item :coreml-flags    — bitfield matching CoreML's
+	#|     COREMLFlags enum (e.g. COREML_FLAG_USE_CPU_ONLY = 1,
+	#|     COREML_FLAG_ONLY_ENABLE_DEVICE_WITH_ANE = 4). Default 0
+	#|     keeps CoreML's full ANE-eligible op set.
+	#|
+	#| Defaults preserve the prior behaviour (every provider
+	#| registered with flags=0 → first device, default config).
+	#| See docs/Readme.rakudoc § "Provider flags" for the per-
+	#| provider bit meanings.
 	multi method new(
 		Str:D :$path!,
 		:@providers = (CPU,),
 		Str :$log-id = 'onnx-native',
+		Int :$cuda-device-id = 0,
+		Int :$coreml-flags   = 0,
 	) {
 		self!create-common(
-			:@providers, :$log-id,
+			:@providers, :$log-id, :$cuda-device-id, :$coreml-flags,
 			:create-session(-> $env, $opts, $err {
 				my $out = CArray[OrtSessionHandle].new;
 				$out[0] = OrtSessionHandle;
@@ -67,15 +145,17 @@ class Session is export {
 	}
 
 	#| Load a model from an in-memory Blob (e.g. downloaded or
-	#| mmap'd).
+	#| mmap'd). Same provider-tuning args as the path-based ctor.
 	multi method new(
 		Blob:D :$bytes!,
 		:@providers = (CPU,),
 		Str :$log-id = 'onnx-native',
+		Int :$cuda-device-id = 0,
+		Int :$coreml-flags   = 0,
 	) {
 		my $ptr = nativecast(Pointer[uint8], $bytes);
 		self!create-common(
-			:@providers, :$log-id,
+			:@providers, :$log-id, :$cuda-device-id, :$coreml-flags,
 			:create-session(-> $env, $opts, $err {
 				my $out = CArray[OrtSessionHandle].new;
 				$out[0] = OrtSessionHandle;
@@ -89,6 +169,8 @@ class Session is export {
 	method !create-common(
 		:@providers!,
 		Str :$log-id!,
+		Int :$cuda-device-id!,
+		Int :$coreml-flags!,
 		:&create-session!,
 		--> Session:D
 	) {
@@ -127,9 +209,19 @@ class Session is export {
 				).throw;
 			}
 			next if $prov == CPU;
+			# Map the per-provider tuning arg into the shim's
+			# `flags` channel. Each provider interprets the int64
+			# differently — see docs/Readme.rakudoc § Provider
+			# flags. CPU is skipped above (no flags). DML rides on
+			# the same channel; not surfaced yet so it stays at 0.
+			my int64 $flags = do given $prov {
+				when CUDA   { $cuda-device-id }
+				when COREML { $coreml-flags }
+				default     { 0 }
+			};
 			$err = err-slot();
 			$rc = onnx_shim_enable_provider(
-				$options, provider-name($prov), 0, $err);
+				$options, provider-name($prov), $flags, $err);
 			unless $rc == ORT_OK {
 				my $msg = ffi-extract-error($err)
 					// 'enable_provider failed';
@@ -242,28 +334,27 @@ class Session is export {
 			).throw;
 		}
 
-		# Up to 16 dims is plenty for any realistic tensor
-		my $elem-out  = CArray[int32].new;  $elem-out[0]  = 0;
-		my $rank-out  = CArray[size_t].new; $rank-out[0]  = 0;
-		my $shape-out = CArray[int64].new;
-		$shape-out[$_] = 0 for ^16;
-		my $err = err-slot();
-		my $rc = $input
-			?? onnx_shim_session_input_type_info(
-					$!handle, $idx, $elem-out, $rank-out,
-					$shape-out, 16, $err)
-			!! onnx_shim_session_output_type_info(
-					$!handle, $idx, $elem-out, $rank-out,
-					$shape-out, 16, $err);
-		self!check-rc($rc, $err,
-			"Session{$input ?? 'Input' !! 'Output'}TypeInfo[$name]");
-
-		my $rank = $rank-out[0];
-		my @shape = (^$rank).map({ $shape-out[$_].Int });
-		my $elem = dtype-from-int($elem-out[0].Int);
+		my $context = "Session{$input ?? 'Input' !! 'Output'}TypeInfo[$name]";
+		my ($shape, $elem-int) = fetch-shape-with-cap(
+			-> $shape-out, $cap, $err {
+				my $elem-out = CArray[int32].new;  $elem-out[0]  = 0;
+				my $rank-out = CArray[size_t].new; $rank-out[0]  = 0;
+				my $rc = $input
+					?? onnx_shim_session_input_type_info(
+							$!handle, $idx, $elem-out, $rank-out,
+							$shape-out, $cap, $err)
+					!! onnx_shim_session_output_type_info(
+							$!handle, $idx, $elem-out, $rank-out,
+							$shape-out, $cap, $err);
+				($rc, $rank-out[0], $elem-out[0]);
+			},
+			$context,
+		);
+		my @shape = $shape.list;
+		my $elem = dtype-from-int($elem-int.Int);
 		without $elem {
 			X::ONNX::Native::Unsupported.new(
-				reason => "Unknown tensor element type { $elem-out[0] } "
+				reason => "Unknown tensor element type $elem-int "
 					~ "in model I/O. Upgrade ONNX::Native or extend "
 					~ "the DType enum.",
 			).throw;
@@ -496,21 +587,22 @@ class Tensor is export {
 	}
 
 	method !populate-shape() {
-		my $elem-out  = CArray[int32].new;  $elem-out[0]  = 0;
-		my $rank-out  = CArray[size_t].new; $rank-out[0]  = 0;
-		my $shape-out = CArray[int64].new;
-		$shape-out[$_] = 0 for ^16;
-		my $err = err-slot();
-		my $rc = onnx_shim_tensor_shape(
-			$!handle, $elem-out, $rank-out, $shape-out, 16, $err);
-		unless $rc == ORT_OK {
-			throw-ffi-error($rc,
-				ffi-extract-error($err) // 'tensor_shape failed');
-		}
-		my $rank = $rank-out[0];
-		@!cached-shape = (^$rank).map({ $shape-out[$_].Int }).list;
-		my $dt = dtype-from-int($elem-out[0].Int);
+		my ($shape, $elem-int) = fetch-shape-with-cap(
+			-> $shape-out, $cap, $err {
+				my $elem-out = CArray[int32].new;  $elem-out[0]  = 0;
+				my $rank-out = CArray[size_t].new; $rank-out[0]  = 0;
+				my $rc = onnx_shim_tensor_shape(
+					$!handle, $elem-out, $rank-out,
+					$shape-out, $cap, $err);
+				($rc, $rank-out[0], $elem-out[0]);
+			},
+			'tensor_shape',
+		);
+		@!cached-shape = $shape.list;
+		my $dt = dtype-from-int($elem-int.Int);
 		@!cached-dtype = ($dt,);
+		# [*] over an empty list is 1 — the right answer for scalar
+		# (rank-0) tensors, which hold exactly one element.
 		$!cached-elem-count = [*] @!cached-shape;
 	}
 

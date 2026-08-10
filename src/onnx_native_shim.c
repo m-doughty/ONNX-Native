@@ -42,23 +42,84 @@
 
 /* --- ORT API accessor --- */
 
-/* Cached pointer to the OrtApi function table. Populated once on
- * the first shim call that needs it (thread-safe because pointer
- * writes on the platforms we support are atomic at word size, and
- * the value is deterministic — any concurrent-init races write the
- * same pointer). */
+/* Cached pointer to the OrtApi function table. Lazily populated
+ * via atomic load/store; concurrent first-callers may all reach
+ * the OrtGetApiBase()->GetApi(...) computation, but they all
+ * compute the same pointer (the function table is process-global
+ * and immutable in ORT), so whichever store wins is fine.
+ *
+ * Pre-fix this was a plain pointer with the comment "writes are
+ * atomic at word size" — true on the platforms we support, but
+ * still UB under the C11 memory model when racing against an
+ * unsynchronised read. TSan flags it; production rarely bites,
+ * but the fix is cheap.
+ *
+ * GCC/Clang: __atomic_* builtins (well-supported on every Unix
+ *   target we ship — macOS arm64/x86_64, Linux x86_64/aarch64).
+ * MSVC: _Interlocked* intrinsics. Pointer-sized atomic loads on
+ *   x64/arm64 are aligned single-instruction reads, but we route
+ *   through Interlocked* for the explicit barrier ordering
+ *   guarantee (matters when the calling thread didn't synchronise
+ *   with the thread that did the init store). */
 static const OrtApi *g_ort = NULL;
+
+#if defined(__GNUC__) || defined(__clang__)
+
+static const OrtApi *
+load_g_ort(void)
+{
+    return (const OrtApi *)__atomic_load_n(&g_ort, __ATOMIC_ACQUIRE);
+}
+
+static void
+store_g_ort(const OrtApi *api)
+{
+    __atomic_store_n(&g_ort, api, __ATOMIC_RELEASE);
+}
+
+#elif defined(_MSC_VER)
+
+#include <intrin.h>
+
+static const OrtApi *
+load_g_ort(void)
+{
+    /* CompareExchange with NULL/NULL is the canonical "atomic
+     * acquire-load with full memory barrier" idiom on MSVC — it
+     * never modifies the pointer (compares-equal only when
+     * already NULL, swaps in NULL which is a no-op), but the
+     * Interlocked* family forces the ordering we need. */
+    return (const OrtApi *)_InterlockedCompareExchangePointer(
+        (void *volatile *)&g_ort, NULL, NULL);
+}
+
+static void
+store_g_ort(const OrtApi *api)
+{
+    _InterlockedExchangePointer((void *volatile *)&g_ort, (void *)api);
+}
+
+#else
+#  error "onnx_native_shim: unsupported compiler — need __atomic_* (GCC/Clang) or _Interlocked* (MSVC)"
+#endif
 
 static const OrtApi *
 get_ort_api(void)
 {
-    if (g_ort == NULL) {
-        const OrtApiBase *base = OrtGetApiBase();
-        if (base != NULL) {
-            g_ort = base->GetApi(ORT_API_VERSION);
-        }
+    const OrtApi *cached = load_g_ort();
+    if (cached != NULL) {
+        return cached;
     }
-    return g_ort;
+    const OrtApiBase *base = OrtGetApiBase();
+    if (base == NULL) {
+        return NULL;
+    }
+    const OrtApi *api = base->GetApi(ORT_API_VERSION);
+    if (api == NULL) {
+        return NULL;
+    }
+    store_g_ort(api);
+    return api;
 }
 
 /* --- Error helpers --- */
@@ -134,6 +195,20 @@ ONNX_SHIM_EXPORT int
 onnx_shim_api_version(void)
 {
     return ORT_API_VERSION;
+}
+
+ONNX_SHIM_EXPORT const char *
+onnx_shim_runtime_version_string(void)
+{
+    /* OrtGetApiBase()->GetVersionString returns a pointer into
+     * libonnxruntime's static rodata — no allocation, no free. We
+     * pass it straight through to the Raku side, which decodes via
+     * `nativecast(Str, ...)` without taking ownership. */
+    const OrtApiBase *base = OrtGetApiBase();
+    if (base == NULL || base->GetVersionString == NULL) {
+        return NULL;
+    }
+    return base->GetVersionString();
 }
 
 /* --- Env --- */
@@ -608,8 +683,16 @@ onnx_shim_create_tensor(const void *data,
                         char **out_error)
 {
     if (out_error != NULL) { *out_error = NULL; }
-    if (data == NULL || shape == NULL || out == NULL) {
-        set_error(out_error, "data, shape, and out must all be non-NULL");
+    if (data == NULL || out == NULL) {
+        set_error(out_error, "data and out must be non-NULL");
+        return ORT_INVALID_ARGUMENT;
+    }
+    /* Scalars (rank == 0) may pass shape == NULL — there are no
+     * dimensions to describe. For rank > 0 we still require shape;
+     * ORT would crash dereferencing it otherwise. */
+    if (rank > 0 && shape == NULL) {
+        set_error(out_error,
+                  "shape must be non-NULL when rank > 0");
         return ORT_INVALID_ARGUMENT;
     }
     *out = NULL;
@@ -735,6 +818,19 @@ onnx_shim_tensor_data(OrtValue *value,
                           "ONNX::Native v0.1 for byte-length queries "
                           "(string / complex / int4 / fp8).");
                 return ORT_NOT_IMPLEMENTED;
+        }
+        /* Defense in depth: a malformed model could report an
+         * elem_count large enough that elem_count * elem_size
+         * wraps size_t. The Raku side already validates input
+         * tensors against expected shape, but this function also
+         * runs against output tensors materialised by ORT, where
+         * we have no a-priori bound. Catch the overflow here so
+         * downstream code never sees a wrapped byte length. */
+        if (elem_size > 0 && elem_count > SIZE_MAX / elem_size) {
+            set_error(out_error,
+                      "Tensor byte length overflows size_t "
+                      "(elem_count * elem_size > SIZE_MAX).");
+            return ORT_INVALID_ARGUMENT;
         }
         *out_byte_len = elem_count * elem_size;
     }

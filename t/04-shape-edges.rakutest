@@ -1,0 +1,109 @@
+use Test;
+use lib 'lib';
+use ONNX::Native;
+use ONNX::Native::Types;
+use ONNX::Native::FFI;
+use NativeCall;
+
+# Edge cases the v0.1 implementation got wrong or skipped:
+#
+#   - rank > 16: the Raku introspection path used a hardcoded
+#     shape buffer of 16, which silently truncated dims for
+#     deeper models. Now auto-grows on the documented shim
+#     re-call protocol.
+#   - rank == 0 (scalar tensors): the shim used to reject
+#     shape == NULL unconditionally; now allows it iff rank == 0.
+#   - byte-length overflow in tensor_data: defensive guard
+#     against `elem_count * elem_size` wrapping size_t.
+#   - runtime-version() / api-version() diagnostics for ABI
+#     mismatch between shim and loaded libonnxruntime.
+
+plan 4;
+
+subtest 'runtime-version + api-version are coherent' => {
+	plan 5;
+	my $api = api-version();
+	ok $api > 0, "api-version() is positive: $api";
+	ok $api >= 20, "api-version() is >= 20 (got $api)";
+
+	my $rt = runtime-version();
+	ok $rt.defined,
+		'runtime-version() returns a Str (libonnxruntime loaded)';
+	ok $rt.chars > 0,
+		"runtime-version() is non-empty: '$rt'";
+	# Loaded libonnxruntime should be at least 1.x — every release
+	# we ever build against is >= 1.20.0. Match `\d+\.\d+\.\d+`.
+	ok $rt ~~ /^ \d+ '.' \d+ '.' \d+ /,
+		"runtime-version() matches semver-ish prefix: '$rt'";
+}
+
+subtest 'rank-0 scalar tensor: create + introspect + roundtrip' => {
+	plan 5;
+
+	# Build a scalar FLOAT32 tensor with shape == [] (rank 0).
+	# The buffer holds exactly one element since [*] of an empty
+	# list is 1 (multiplicative identity).
+	my $blob = buf8.allocate(4);
+	my $ptr = nativecast(CArray[num32], $blob);
+	$ptr[0] = 42e0;
+
+	my $t;
+	lives-ok
+		{ $t = Tensor.from-blob($blob, :shape([]), :dtype(FLOAT32)) },
+		'Tensor.from-blob accepts rank-0 :shape([])';
+
+	is $t.shape.elems, 0, 'scalar tensor reports rank 0';
+	is $t.byte-length, 4,
+		'scalar tensor byte-length = 1 elem * 4 bytes';
+	is-deeply $t.to-num-array.List, (42e0,).List,
+		'scalar tensor decodes to single-element list';
+
+	# Re-fetch via to-blob to make sure the data round-trips
+	# through ORT's borrowed-pointer path on a rank-0 value.
+	my $rt = $t.to-blob;
+	is $rt.bytes, 4, 'to-blob on scalar returns 4 bytes';
+}
+
+subtest 'rank > 16 introspection: 17-dim Identity model' => {
+	plan 7;
+
+	my $fixture = 't/fixtures/high-rank.onnx';
+	ok $fixture.IO.f, 'high-rank.onnx fixture exists';
+
+	my $s = Session.new(:path($fixture));
+	is $s.input-count, 1, 'high-rank model has 1 input';
+	is $s.output-count, 1, 'high-rank model has 1 output';
+
+	my $info = $s.input-info('X');
+	isa-ok $info, TensorInfo, 'input X info is a TensorInfo';
+	is $info.shape.elems, 17,
+		'input X has rank 17 (not silently truncated to 16)';
+	is-deeply $info.shape.List, (1 xx 17).List,
+		'all 17 dims are 1';
+
+	# Output mirrors input through Identity.
+	is-deeply $s.output-info('Y').shape.List, (1 xx 17).List,
+		'output Y also reports rank 17';
+}
+
+subtest 'rank > 16 inference: tensor_shape on rank-17 OrtValue' => {
+	plan 4;
+
+	my $s = Session.new(:path('t/fixtures/high-rank.onnx'));
+
+	# Build a rank-17 input: shape is 17 ones, total 1 element.
+	my $blob = buf8.allocate(4);
+	my $ptr = nativecast(CArray[num32], $blob);
+	$ptr[0] = 7e0;
+	my @shape = 1 xx 17;
+	my $x = Tensor.from-blob($blob, :@shape, :dtype(FLOAT32));
+
+	my %out = $s.run(:inputs({X => $x}), :outputs(['Y',]));
+	ok %out<Y>.defined, 'Y came back from Identity';
+	is %out<Y>.shape.elems, 17,
+		'output Tensor.shape reports rank 17 (auto-grown buffer)';
+	is-deeply %out<Y>.shape.List, (1 xx 17).List,
+		'output shape is 17 ones — no dims dropped';
+	is-deeply %out<Y>.to-num-array.List, (7e0,).List,
+		'Identity preserved the single value through rank-17 I/O';
+}

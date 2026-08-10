@@ -19,6 +19,14 @@
 # Linux shims were rebuilt with -Wl,--disable-new-dtags to emit
 # DT_RPATH instead of DT_RUNPATH, so a user's LD_LIBRARY_PATH
 # can no longer hijack the staged libonnxruntime.
+#
+# When CI rebuilds for r4 the release will also include the
+# CUDA-enabled bundles:
+#   onnxruntime-linux-x86_64-glibc-gpu.tar.gz
+#   onnxruntime-windows-x86_64-gpu.zip
+# These get fetched by Build.rakumod when the user installs with
+# ONNX_NATIVE_WITH_CUDA=1. Paste their SHAs in alongside the CPU
+# entries below — Build.rakumod looks up by exact filename.
 
 c421c74df0271617e7ff04d855785ee16b803ca480b4beb48842c41aaad6f582  onnxruntime-macos-arm64.tar.gz
 8c61e8ff165f86f40ed272753222debdd625ecfb9f9773d9f5ad3054a67611d0  onnxruntime-macos-x86_64.tar.gz

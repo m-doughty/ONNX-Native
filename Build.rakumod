@@ -42,10 +42,21 @@
 #|                                 (defaults to XDG_DATA_HOME)
 #|   ONNX_NATIVE_LIB_DIR=<path>    (runtime) load shim from this
 #|                                 dir instead of the staged dir
-#|   ONNX_NATIVE_WITH_CUDA=1       (deferred) opt in to CUDA provider
-#|                                 on Linux — picks the gpu tarball
-#|                                 variant and compiles the shim
-#|                                 with ONNX_SHIM_WITH_CUDA
+#|   ONNX_NATIVE_WITH_CUDA=1       opt in to CUDA execution provider
+#|                                 on x86_64 Linux / Windows. Picks
+#|                                 Microsoft's `*-gpu` prebuilt
+#|                                 variant (bundles libcudart /
+#|                                 libcudnn / libcublas — user
+#|                                 needs only the NVIDIA driver, not
+#|                                 a full toolkit install), stages
+#|                                 it under a `-gpu` suffixed dir so
+#|                                 CPU and GPU variants can coexist,
+#|                                 and compiles the shim with
+#|                                 -DONNX_SHIM_WITH_CUDA=1. macOS,
+#|                                 aarch64 Linux, and Windows ARM64
+#|                                 have no upstream CUDA build —
+#|                                 setting this on those platforms
+#|                                 is a hard error.
 
 class Build {
 
@@ -112,25 +123,57 @@ class Build {
 		'windows-arm64'          => 'win-arm64',
 	;
 
+	#| Platforms that have an upstream `*-gpu` prebuilt (CUDA + cuDNN
+	#| + cuBLAS bundled). Microsoft only publishes for x86_64 Linux
+	#| and Windows; aarch64 has no upstream GPU build (Jetson uses
+	#| JetPack instead, server-class aarch64-CUDA is too rare to
+	#| matter), Windows-on-ARM has no NVIDIA driver at all, and
+	#| macOS uses CoreML / Metal — no CUDA story.
+	my @CUDA-PLATFORMS = <linux-x86_64-glibc windows-x86_64>;
+
 	# --- Entry point ----------------------------------------------------
 
 	method build($dist-path) {
 		my Bool $prefer-system = ?%*ENV<ONNX_NATIVE_PREFER_SYSTEM>;
 		my Bool $binary-only   = ?%*ENV<ONNX_NATIVE_BINARY_ONLY>;
+		my Bool $with-cuda     = ?%*ENV<ONNX_NATIVE_WITH_CUDA>;
 
 		my Str $binary-tag = self!binary-tag($dist-path);
 		my Str $plat = self!detect-platform;
 
-		# Copy BINARY_TAG into resources so FFI.rakumod can locate
-		# the staged dir at runtime. Tiny text file — survives
-		# zef's resource-hashing rename intact.
-		self!stage-binary-tag($dist-path);
+		# WITH_CUDA bumps us to a `-gpu` suffixed effective tag so
+		# the staged dir, cache dir, and our-Release artefact name
+		# don't collide with the CPU variant. A user can have both
+		# installed (different Raku dist installs) and switch via
+		# ONNX_NATIVE_LIB_DIR.
+		if $with-cuda && !@CUDA-PLATFORMS.first(* eq ($plat // '')) {
+			my Str $detected = $plat // ($*KERNEL.name ~ '-' ~ $*KERNEL.hardware);
+			die "❌ ONNX_NATIVE_WITH_CUDA=1 set but CUDA prebuilts only "
+			  ~ "exist for { @CUDA-PLATFORMS.join(' / ') }. Detected: "
+			  ~ "$detected. macOS uses CoreML; aarch64 Linux / Windows "
+			  ~ "ARM64 have no upstream NVIDIA build. Unset "
+			  ~ "ONNX_NATIVE_WITH_CUDA to install the CPU variant.";
+		}
+		my Str $effective-tag = $with-cuda
+			?? ($binary-tag ~ '-gpu')
+			!! $binary-tag;
 
-		my IO::Path $root  = self!staged-root-dir($binary-tag);
+		# Copy BINARY_TAG (with -gpu suffix when applicable) into
+		# resources so FFI.rakumod can locate the staged dir at
+		# runtime. Tiny text file — survives zef's resource-hashing
+		# rename intact.
+		self!stage-binary-tag($dist-path, $effective-tag);
+
+		my IO::Path $root  = self!staged-root-dir($effective-tag);
 		my IO::Path $stage = $root.add('lib');
 
 		if $prefer-system {
-			say "ONNX_NATIVE_PREFER_SYSTEM=1 — using system libonnxruntime.";
+			say "ONNX_NATIVE_PREFER_SYSTEM=1 — using system libonnxruntime"
+				~ ($with-cuda ?? " (with CUDA EP enabled in shim — your "
+								 ~ "system libonnxruntime must export "
+								 ~ "OrtSessionOptionsAppendExecutionProvider_CUDA, "
+								 ~ "or the link will fail)" !! "")
+				~ ".";
 			return self!build-from-system($dist-path, $stage);
 		}
 
@@ -154,7 +197,7 @@ class Build {
 				if $binary-only {
 					die "ONNX_NATIVE_BINARY_ONLY=1 set but system glibc "
 					  ~ "$have is older than prebuilt target $MIN-GLIBC "
-					  ~ "($plat / $binary-tag). Install a newer "
+					  ~ "($plat / $effective-tag). Install a newer "
 					  ~ "libonnxruntime or unset ONNX_NATIVE_BINARY_ONLY.";
 				}
 				note "⚠️  System glibc $have is older than prebuilt "
@@ -165,10 +208,13 @@ class Build {
 		}
 
 		# Primary: our own GitHub Release (or user-set override).
-		if self!try-prebuilt($dist-path, $plat, $binary-tag, $root) {
-			say "✅ Installed prebuilt ONNX Runtime ($plat) for "
-			  ~ "$binary-tag → $stage.";
+		if self!try-prebuilt($dist-path, $plat, $effective-tag, $root,
+				:$with-cuda) {
+			say "✅ Installed prebuilt ONNX Runtime ($plat"
+			  ~ ($with-cuda ?? " + CUDA" !! "")
+			  ~ ") for $effective-tag → $stage.";
 			self!compile-shim($dist-path, $stage, $root.add('include'));
+			self!cleanup-old-stages($root);
 			return True;
 		}
 
@@ -185,21 +231,24 @@ class Build {
 			%*ENV<ONNX_NATIVE_BINARY_URL> =
 				'https://github.com/microsoft/onnxruntime/releases/download';
 			LEAVE %*ENV<ONNX_NATIVE_BINARY_URL> = %saved<ONNX_NATIVE_BINARY_URL>;
-			if self!try-prebuilt($dist-path, $plat, $binary-tag, $root) {
-				say "✅ Installed ONNX Runtime ($plat) from upstream "
-				  ~ "for $binary-tag → $stage.";
+			if self!try-prebuilt($dist-path, $plat, $effective-tag, $root,
+					:$with-cuda) {
+				say "✅ Installed ONNX Runtime ($plat"
+				  ~ ($with-cuda ?? " + CUDA" !! "")
+				  ~ ") from upstream for $effective-tag → $stage.";
 				self!compile-shim($dist-path, $stage, $root.add('include'));
+				self!cleanup-old-stages($root);
 				return True;
 			}
 		}
 
 		if $binary-only {
 			die "ONNX_NATIVE_BINARY_ONLY=1 set but prebuilt download "
-			  ~ "failed for $plat ($binary-tag) from all known "
+			  ~ "failed for $plat ($effective-tag) from all known "
 			  ~ "sources (our Release + Microsoft upstream).";
 		}
 
-		note "⚠️  Prebuilt unavailable for $plat ($binary-tag) — "
+		note "⚠️  Prebuilt unavailable for $plat ($effective-tag) — "
 		   ~ "falling back to system libonnxruntime.";
 		self!build-from-system($dist-path, $stage);
 	}
@@ -290,28 +339,40 @@ class Build {
 
 	# --- Prebuilt binary path -------------------------------------------
 
-	method !try-prebuilt($dist-path, Str $plat, Str $binary-tag, IO::Path $root --> Bool) {
+	method !try-prebuilt($dist-path, Str $plat, Str $effective-tag,
+			IO::Path $root, Bool :$with-cuda = False --> Bool) {
 		my Str $base-url = %*ENV<ONNX_NATIVE_BINARY_URL> // $DEFAULT-BASE-URL;
-		my Str $ort-version = self!ort-version-from-tag($binary-tag);
+		my Str $ort-version = self!ort-version-from-tag($effective-tag);
 		my Bool $is-win = $plat.starts-with('windows');
 
 		# Decide artifact + URL shape based on the base URL. When
 		# pointing at Microsoft's upstream (a convenience for dev
 		# iteration), switch to their naming / path scheme.
+		#
+		# GPU naming:
+		#   our:      onnxruntime-<plat>-gpu.<ext>
+		#   upstream: onnxruntime-<ms-slug>-gpu-<ver>.<ext>
+		#
+		# Microsoft only publishes `-gpu` for linux-x64 / win-x64;
+		# the WITH_CUDA platform check earlier guarantees we don't
+		# get here on a CUDA-unsupported platform.
 		my ($artifact, $url, $upstream) = do if $base-url.contains('microsoft/onnxruntime') {
 			my Str $up-slug = %UPSTREAM-SLUGS{$plat} // $plat;
 			my Str $up-ext = $is-win ?? 'zip' !! 'tgz';
-			my $up = sprintf($UPSTREAM-ARTIFACT-PATTERN, $up-slug,
-				$ort-version, $up-ext);
+			my Str $infix = $with-cuda ?? '-gpu' !! '';
+			my $up = sprintf('onnxruntime-%s%s-%s.%s',
+				$up-slug, $infix, $ort-version, $up-ext);
 			($up, "$base-url/v$ort-version/$up", True);
 		}
 		else {
 			my Str $ext = $is-win ?? 'zip' !! 'tar.gz';
-			my $our = sprintf($OUR-ARTIFACT-PATTERN, $plat, $ext);
-			($our, "$base-url/$binary-tag/$our", False);
+			my Str $suffix = $with-cuda ?? '-gpu' !! '';
+			my $our = sprintf('onnxruntime-%s%s.%s',
+				$plat, $suffix, $ext);
+			($our, "$base-url/$effective-tag/$our", False);
 		}
 
-		my IO::Path $cache-dir = self!cache-dir($binary-tag);
+		my IO::Path $cache-dir = self!cache-dir($effective-tag);
 		my IO::Path $cached = $cache-dir.add($artifact);
 
 		unless $cached.e {
@@ -353,9 +414,10 @@ class Build {
 	}
 
 	#| Parse the Raku-side binary tag like binaries-onnxruntime-1.20.0-r1
-	#| and return the upstream ORT version (1.20.0).
+	#| and return the upstream ORT version (1.20.0). Tolerates the
+	#| optional `-gpu` suffix the WITH_CUDA install path appends.
 	method !ort-version-from-tag(Str $tag --> Str) {
-		if $tag ~~ / 'onnxruntime-' (\d+ '.' \d+ '.' \d+) '-r' \d+ $/ {
+		if $tag ~~ / 'onnxruntime-' (\d+ '.' \d+ '.' \d+) '-r' \d+ ['-gpu']? $/ {
 			return ~$0;
 		}
 		die "❌ Can't parse ORT version from BINARY_TAG '$tag'. "
@@ -620,6 +682,41 @@ class Build {
 
 	# --- Shared helpers -------------------------------------------------
 
+	#|( Remove sibling staged dirs for older BINARY_TAGs. zef has no
+	    uninstall hook, and Build.rakumod is the only place we can
+	    garbage-collect obsolete staged bundles, so we do it here on
+	    every prebuilt install: any sibling under the staged-libs root
+	    that looks like one of our `binaries-onnxruntime-*` dirs and
+	    isn't the currently-active one gets removed. Without this, a
+	    series of upgrades leaves r1, r2, r3, … stacked on disk, where
+	    stale Raku precomp can still load older versions alongside the
+	    new one (cf. the Vips::Native r7→r8 incident that motivated
+	    this pattern across the monorepo).
+
+	    Set ONNX_NATIVE_KEEP_OLD_STAGES=1 to disable. )
+	method !cleanup-old-stages(IO::Path $current-root --> Nil) {
+		return if %*ENV<ONNX_NATIVE_KEEP_OLD_STAGES>;
+
+		# $current-root layout is …/ONNX-Native/<binary-tag>. Sibling
+		# tag dirs live one level up.
+		my $parent = $current-root.parent;
+		return unless $parent.d;
+		return unless $parent.basename eq 'ONNX-Native';
+
+		my Str $current-abs = $current-root.absolute;
+
+		for $parent.dir -> $entry {
+			next unless $entry.d;
+			next unless $entry.basename.starts-with('binaries-onnxruntime-');
+			next if $entry.absolute eq $current-abs;
+			say "🧹 Removing orphaned staged dir: { $entry }";
+			try {
+				run 'rm', '-rf', $entry.Str;
+				CATCH { default { note "  (failed to remove: { .message })" } }
+			};
+		}
+	}
+
 	method !staged-root-dir(Str $binary-tag --> IO::Path) {
 		my Str $base = %*ENV<ONNX_NATIVE_DATA_DIR>
 			// %*ENV<XDG_DATA_HOME>
@@ -630,11 +727,15 @@ class Build {
 		"$base/ONNX-Native/$binary-tag".IO;
 	}
 
-	method !stage-binary-tag($dist-path) {
-		my IO::Path $src = "$dist-path/BINARY_TAG".IO;
+	method !stage-binary-tag($dist-path, Str $effective-tag) {
+		# Write the effective tag (with optional -gpu suffix) so
+		# FFI.rakumod's runtime resolver lands on the right staged
+		# dir. We deliberately don't copy BINARY_TAG verbatim — the
+		# runtime needs to know whether this install staged the GPU
+		# bundle or the CPU one, and the suffix is the truth.
 		my IO::Path $dst = "$dist-path/resources/BINARY_TAG".IO;
 		$dst.parent.mkdir;
-		copy $src, $dst;
+		$dst.spurt("$effective-tag\n");
 	}
 
 	method !cache-dir(Str $binary-tag --> IO::Path) {

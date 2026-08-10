@@ -32,7 +32,7 @@ jobs:
           - 'latest'
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: Raku/setup-raku@v1
         with:
           raku-version: ${{ matrix.raku-version }}
@@ -42,7 +42,7 @@ jobs:
       # on runners with no published prebuilt yet.
       - name: Setup VS Dev Environment (Windows)
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: m-doughty/msvc-dev-cmd@v1-node24
         with:
           arch: amd64
 

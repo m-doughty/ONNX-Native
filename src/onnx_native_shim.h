@@ -106,9 +106,10 @@ ONNX_SHIM_EXPORT int onnx_shim_session_output_name(OrtSession *session,
                                                    size_t idx,
                                                    char **out_name,
                                                    char **out_error);
-/* Free a name returned by input_name/output_name via ORT's
- * default allocator (the same allocator they were allocated
- * from internally). Always safe to call with NULL. */
+/* Free a name returned by input_name/output_name. The shim
+ * malloc-copies names out of ORT's default allocator before
+ * returning them, so this is implemented as a plain free()
+ * (NOT an ORT AllocatorFree). Always safe to call with NULL. */
 ONNX_SHIM_EXPORT void onnx_shim_free_name(char *name);
 
 /* Type info: returns element type + dimension rank + up to
@@ -135,7 +136,11 @@ ONNX_SHIM_EXPORT int onnx_shim_session_output_type_info(OrtSession *session,
 
 /* Create a tensor that borrows `data` for its lifetime.
  * elem_type is an ONNXTensorElementDataType value (1=FLOAT, 6=INT32,
- * 7=INT64 — see the header for the full enum). */
+ * 7=INT64 — see the header for the full enum).
+ *
+ * Scalar tensors are supported: pass rank == 0 with shape == NULL
+ * (or any value — the shim ignores shape when rank == 0). For
+ * rank > 0, both shape and rank must describe the buffer. */
 ONNX_SHIM_EXPORT int onnx_shim_create_tensor(const void *data,
                                              size_t byte_len,
                                              const int64_t *shape,
@@ -186,6 +191,19 @@ ONNX_SHIM_EXPORT void onnx_shim_free_error(char *err);
 /* Returns the ORT_API_VERSION the shim was compiled against. Used
  * by the Raku side to sanity-check ABI compatibility. */
 ONNX_SHIM_EXPORT int onnx_shim_api_version(void);
+
+/* Returns the runtime ONNX Runtime version string (e.g. "1.20.1"),
+ * as reported by OrtGetApiBase()->GetVersionString(). The pointer
+ * is owned by libonnxruntime and remains valid for the lifetime of
+ * the loaded library; the caller MUST NOT free it. Returns NULL if
+ * libonnxruntime is unavailable (OrtGetApiBase() returned NULL).
+ *
+ * Pairs with onnx_shim_api_version() for diagnostics: the shim is
+ * compiled against an ORT_API_VERSION, the runtime is whatever
+ * libonnxruntime got loaded — surfacing both lets the Raku side
+ * produce useful "shim compiled for X, runtime is Y" messages when
+ * a user swaps shared libs. */
+ONNX_SHIM_EXPORT const char *onnx_shim_runtime_version_string(void);
 
 #ifdef __cplusplus
 }

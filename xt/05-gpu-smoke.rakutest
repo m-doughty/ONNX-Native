@@ -1,0 +1,90 @@
+use Test;
+use lib 'lib';
+use ONNX::Native;
+use ONNX::Native::Types;
+
+# Manual GPU smoke test. Not run by `prove6 t/` — the host needs:
+#
+#   - Hardware: an NVIDIA GPU (driver installed; no CUDA toolkit
+#     required since the prebuilt bundles libcudart / libcudnn).
+#   - Install: `ONNX_NATIVE_WITH_CUDA=1 zef install . --force-install`,
+#     so the staged dir resolves to the `-gpu` suffix and the shim
+#     is compiled with -DONNX_SHIM_WITH_CUDA=1.
+#   - Opt-in: this file lives under xt/ and is gated on
+#     ONNX_NATIVE_TEST_GPU=1 to avoid running on machines that
+#     happen to have a non-NVIDIA GPU plus our GPU bundle (would
+#     fail at session creation with "EP_FAIL").
+#
+# Run with:
+#
+#     ONNX_NATIVE_TEST_GPU=1 prove6 -Ilib xt/05-gpu-smoke.rakutest
+#
+# Reuses the t/fixtures/add.onnx model — same trivial Add op the
+# CPU tests use, so any divergence between CPU and CUDA results
+# is a bug.
+
+unless %*ENV<ONNX_NATIVE_TEST_GPU> {
+	plan :skip-all<Set ONNX_NATIVE_TEST_GPU=1 to run GPU smoke tests>;
+	exit;
+}
+
+plan 4;
+
+my $fixture = 't/fixtures/add.onnx';
+ok $fixture.IO.f, 'add.onnx fixture exists';
+
+subtest 'CUDA provider registers + runs Add' => {
+	plan 4;
+
+	my $s;
+	lives-ok
+		{ $s = Session.new(:path($fixture), :providers<cuda cpu>) },
+		'Session.new with :providers<cuda cpu> succeeds';
+
+	my $a = Tensor.from-nums([1e0, 2e0, 3e0], :shape([3]));
+	my $b = Tensor.from-nums([10e0, 20e0, 30e0], :shape([3]));
+	my %out = $s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+	ok %out<C>.defined, 'output tensor materialised';
+	is %out<C>.shape.elems, 1, 'output is rank-1';
+	is-deeply %out<C>.to-num-array.List, (11e0, 22e0, 33e0).List,
+		'CUDA result matches CPU expectation';
+}
+
+subtest 'cuda-device-id arg threads through to provider' => {
+	plan 1;
+
+	# Device 0 is always present when CUDA itself is. Higher
+	# device ids are environment-specific (you might have an 8x
+	# A100 box, but CI generally has one card). If you have multi-
+	# GPU and want to verify, change this to 1+ locally.
+	lives-ok
+		{ Session.new(:path($fixture), :providers<cuda cpu>,
+		              :cuda-device-id(0)) },
+		'explicit :cuda-device-id(0) accepted';
+}
+
+subtest 'invalid cuda-device-id surfaces as runtime error' => {
+	plan 2;
+
+	# Asking for device 99 will fail at provider register or first
+	# inference. ORT's exact error code varies by version; we just
+	# assert that *something* errors out cleanly rather than
+	# silently corrupting tensors. Skip this if you genuinely have
+	# 100 GPUs (in which case, congrats, the test is wrong).
+	my $exception;
+	try {
+		# Single-word `<cuda>` would be a Str (Raku's word-quote
+		# operator returns a single value for one item) and miss
+		# the :@providers binding; use the explicit array form.
+		my $s = Session.new(:path($fixture), :providers([CUDA,]),
+		                    :cuda-device-id(99));
+		# Some ORT versions defer the device check to first run.
+		my $a = Tensor.from-nums([1e0, 2e0, 3e0], :shape([3]));
+		my $b = Tensor.from-nums([4e0, 5e0, 6e0], :shape([3]));
+		$s.run(:inputs({A => $a, B => $b}), :outputs(['C',]));
+		CATCH { default { $exception = $_; } }
+	}
+	ok $exception.defined, 'invalid device id threw';
+	isa-ok $exception, X::ONNX::Native::Error,
+		'thrown as ONNX::Native error type';
+}
