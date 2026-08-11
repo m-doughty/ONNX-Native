@@ -1,6 +1,142 @@
 Revision history for ONNX::Native
 
 {{$NEXT}}
+    - CI: fix the macOS bundle lanes dying at the shim step with
+      "cuda_def[@]: unbound variable" — macOS runners resolve
+      `shell: bash` to /bin/bash 3.2, where expanding an empty
+      array under `set -u` is an error (fixed in bash 4.4, so the
+      Linux lanes never saw it). Now uses the portable
+      ${arr[@]+"${arr[@]}"} idiom.
+    - lib/ONNX/Native/FFI.rakumod: convert the `$shim-lib` library-
+      path binding from `constant` to a state-cached sub
+      (`sub shim-lib { state $r = _resolve-shim(); $r }`).
+      `constant X = _resolve-shim()` ran at compile time and baked
+      the resolved path into the precompiled bytecode — and Rakudo
+      doesn't track `resources/BINARY_TAG` as a precomp dependency.
+      A BINARY_TAG bump (which moves staged libs to a new versioned
+      directory and may GC the previous one) would leave the
+      precomp pointing at the old path, producing "Cannot locate
+      native library" errors on freshly installed packages until
+      the user manually ran `rm -rf ~/.raku/precomp/`. Deferring
+      resolution to first sub-call means each process picks up the
+      current tag, regardless of when the precomp was built.
+      NativeCall accepts a Callable for `is native()` and invokes
+      it lazily on first use of each bound sub. All
+      `is native($shim-lib)` callsites updated to
+      `is native(&shim-lib)` to match.
+    - Same fix applied across all three native libs in this release
+      window (Notcurses::Native, Vips::Native, ONNX::Native), so
+      consumers upgrading any of them past the constant-baking
+      precomp bug get the fix consistently.
+    - `Build.rakumod` now garbage-collects sibling staged dirs for
+      older BINARY_TAGs after each successful install. Without this,
+      every release accumulated another `binaries-onnxruntime-*` dir
+      under `~/.local/share/ONNX-Native/`, where stale Raku precomp
+      could load the older libs alongside the new ones — cf. the
+      Vips::Native r7→r8 incident that revealed this class of bug.
+      Set `ONNX_NATIVE_KEEP_OLD_STAGES=1` to opt out (e.g. when
+      intentionally pinning multiple versions for testing).
+    - Fix silent shape truncation for rank > 16 models. The Raku
+      introspection path (`Session.input-info` / `output-info` and
+      `Tensor.shape`) was hardcoded to a 16-element shape buffer
+      and read past it via `(^$rank).map`, producing garbage trailing
+      dims for any model deeper than 16D. The shim already documents
+      a re-call protocol for cap-exceeded shapes; the Raku side now
+      honours it via a shared `fetch-shape-with-cap` helper that
+      auto-grows the buffer (one extra ORT call worst case, common
+      case unchanged). Covered by t/04-shape-edges.rakutest using a
+      synthetic rank-17 Identity model fixture.
+    - Allow rank-0 (scalar) tensors in `onnx_shim_create_tensor`.
+      The shim used to reject `shape == NULL` unconditionally, which
+      blocked the legitimate "scalar OrtValue" case (output-as-pooled
+      classifier head, etc.). Now `shape == NULL` is accepted iff
+      `rank == 0`; for `rank > 0`, shape is still required to avoid
+      ORT dereferencing NULL. `Tensor.from-blob(:shape([]))` now
+      works end-to-end.
+    - Add `SIZE_MAX / elem_size` overflow guard in
+      `onnx_shim_tensor_data`'s byte-length computation. Output
+      tensors materialised by ORT have no a-priori bound, so a
+      malformed model could in principle wrap size_t. Defense in
+      depth — Raku-side input validation already covers input
+      tensors but doesn't run on outputs.
+    - Add `onnx_shim_runtime_version_string` shim export +
+      `runtime-version()` / `api-version()` Raku-side helpers.
+      `api-version()` is the ORT_API_VERSION the shim was compiled
+      against; `runtime-version()` is whatever libonnxruntime
+      actually got loaded (e.g. "1.20.1"). Surfacing both turns
+      "requested API version not available" load failures into
+      diagnosable "shim X, runtime Y" messages.
+    - Fix stale doc comment for `onnx_shim_free_name` in
+      `onnx_native_shim.h`. Said "Free via ORT's default allocator"
+      but the implementation malloc-copies before returning, so the
+      free is a plain `free()` (and has been since 0.1.0). Comment
+      now matches the implementation.
+    - Atomic load/store on `g_ort` cache pointer in the shim. The
+      lazy init pattern was technically a data race under C11 even
+      though concurrent first-callers compute the same pointer
+      (TSan flags it; pointer-write-as-atomic on x86/x64/arm64 is
+      true in practice but not formally guaranteed). Now uses
+      `__atomic_load_n` / `__atomic_store_n` on GCC / Clang and
+      `_InterlockedCompareExchangePointer` /
+      `_InterlockedExchangePointer` on MSVC, with an
+      acquire-on-load / release-on-store ordering. Behaviour is
+      unchanged for the common case (single-threaded init); the
+      change closes the race for Raku apps that drive inference
+      from multiple Promises.
+    - Document provider flags semantics in `docs/Readme.rakudoc`
+      (Provider enum § "Provider flags") and reference from
+      `Native.rakumod`. The shim's `flags` argument is per-provider:
+      CoreML COREMLFlags bitfield, CUDA / DML `device_id`, ignored
+      for CPU. Currently the Raku surface hardcodes flags=0 and
+      this Pod6 paragraph sets the contract for the future
+      `:%provider-options` API.
+    - Bump `BINARY_TAG` to `binaries-onnxruntime-1.20.0-r4` in
+      `BINARY_TAG` and `resources/BINARY_TAG`. Triggers
+      `.github/workflows/build-binaries.yml` to rebuild the
+      per-platform tarballs (picking up the shim's atomic-init,
+      scalar-tensor, runtime-version-string changes). New
+      `resources/checksums.txt` will land alongside CI's release
+      output.
+    - CUDA GPU support on x86_64 Linux + x86_64 Windows. Set
+      `ONNX_NATIVE_WITH_CUDA=1` at install time and Build.rakumod
+      switches the upstream URL to Microsoft's `*-gpu` prebuilt
+      (which bundles libcudnn / libcublas / libcudart — end user
+      only needs the NVIDIA driver, not a toolkit install),
+      stages it under a `-gpu` suffixed dir so CPU and GPU
+      bundles coexist, and compiles the shim with
+      `-DONNX_SHIM_WITH_CUDA=1`. Refused cleanly on macOS,
+      aarch64 Linux, and Windows ARM64 — Microsoft doesn't
+      publish CUDA prebuilts for those targets and the platforms
+      themselves either lack drivers (Win-on-ARM) or live in a
+      different ecosystem (Jetson / JetPack on aarch64-Linux).
+    - `Session.new` now takes `:cuda-device-id` and
+      `:coreml-flags` named args (default 0). Each routes to the
+      matching provider's `flags` channel via
+      `onnx_shim_enable_provider`. The previous hardcoded 0
+      becomes the default, so existing calls keep their
+      behaviour. CUDA device selection finally works for users
+      with multi-GPU boxes; CoreML callers can now opt into
+      `COREML_FLAG_USE_CPU_ONLY` / `..._ANE` etc. without editing
+      the source. DirectML's `device_id` isn't surfaced (DML
+      itself is deferred, separate NuGet sourcing).
+    - `.github/workflows/build-binaries.yml` matrix gains
+      `linux-x86_64-glibc-gpu` + `windows-x86_64-gpu` entries.
+      They download the matching `*-gpu` upstream prebuilt and
+      produce parallel artifacts named
+      `onnxruntime-{linux-x86_64-glibc,windows-x86_64}-gpu.{tar.gz,zip}`
+      that Build.rakumod fetches when WITH_CUDA is set. CI
+      verifies the GPU bundle compiles + links + exports the
+      expected symbols; it does NOT run inference (no free GPU
+      runners on GHA).
+    - New `RELEASING.md` documents the binary-release flow and
+      the manual GPU smoke checklist that gates each binary
+      release. New `xt/05-gpu-smoke.rakutest` runs that smoke
+      via prove6 (gated on `ONNX_NATIVE_TEST_GPU=1`).
+    - Honest CUDA section in `docs/Readme.rakudoc` (was
+      promising "Picks the GPU variant" before any of the
+      plumbing existed). New "Windows — DirectML" section
+      explaining why DML is deferred. `:cuda-device-id` /
+      `:coreml-flags` documented under `Session.new`.
 
 0.1.1  2026-04-24T05:59:58+01:00
     - Add windows-arm64 to the build-binaries.yml matrix.

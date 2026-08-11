@@ -196,6 +196,14 @@ jobs:
           # extern; symbol resolved against the GPU prebuilt's
           # libonnxruntime.so). On a CPU bundle this would fail
           # the link, hence the matrix-level gate.
+          # NOTE: expanded below as ${cuda_def[@]+"${cuda_def[@]}"},
+          # not plain "${cuda_def[@]}" — macOS runners resolve
+          # `shell: bash` to /bin/bash 3.2, where expanding an
+          # EMPTY array under `set -u` is an "unbound variable"
+          # error (fixed in bash 4.4; Linux lanes never see it).
+          # The ${arr[@]+…} form expands to nothing when the array
+          # is empty and to the quoted elements otherwise, on every
+          # bash.
           cuda_def=()
           if [[ "${{ matrix.with-cuda }}" == "true" ]]; then
             cuda_def=(-DONNX_SHIM_WITH_CUDA=1)
@@ -214,7 +222,7 @@ jobs:
             # is less picky but the rule is the same).
             cc -O2 -fPIC -dynamiclib \
               -Wall -Wextra -Wno-unused-parameter \
-              "${cuda_def[@]}" \
+              ${cuda_def[@]+"${cuda_def[@]}"} \
               -arch "${arch}" \
               -install_name "@loader_path/libonnx_native_shim.dylib" \
               -I staged/include \
@@ -247,7 +255,7 @@ jobs:
             # the intended override mechanism.
             cc -O2 -fPIC -shared \
               -Wall -Wextra -Wno-unused-parameter \
-              "${cuda_def[@]}" \
+              ${cuda_def[@]+"${cuda_def[@]}"} \
               -I staged/include \
               src/onnx_native_shim.c \
               -L staged/lib -lonnxruntime \
