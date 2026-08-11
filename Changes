@@ -1,6 +1,8 @@
 Revision history for ONNX::Native
 
 {{$NEXT}}
+
+0.2.0  2026-08-11T14:58:54+01:00
     - CI: fix the macOS bundle lanes dying at the shim step with
       "cuda_def[@]: unbound variable" — macOS runners resolve
       `shell: bash` to /bin/bash 3.2, where expanding an empty
@@ -97,7 +99,7 @@ Revision history for ONNX::Native
       scalar-tensor, runtime-version-string changes). New
       `resources/checksums.txt` will land alongside CI's release
       output.
-    - CUDA GPU support on x86_64 Linux + x86_64 Windows. Set
+    - CUDA GPU support on x86_64 Linux + x86_64 Windows added. Set
       `ONNX_NATIVE_WITH_CUDA=1` at install time and Build.rakumod
       switches the upstream URL to Microsoft's `*-gpu` prebuilt
       (which bundles libcudnn / libcublas / libcudart — end user

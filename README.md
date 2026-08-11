@@ -99,26 +99,42 @@ ONNX_NATIVE_PREFER_SYSTEM=1 zef install ONNX::Native
 
 Build.rakumod probes Homebrew (`/opt/homebrew` / `/usr/local`) and common Linux lib paths for the runtime and header set. It compiles the shim against what it finds and skips staging.
 
-Linux — CUDA GPU
-----------------
+Linux / Windows — CUDA GPU
+--------------------------
 
 ```shell
 ONNX_NATIVE_WITH_CUDA=1 zef install ONNX::Native
 ```
 
-Picks the GPU variant of Microsoft's Linux prebuilt (ORT + CUDA EP + TensorRT EP) and compiles the shim with the CUDA provider registration path enabled. Requires CUDA + cuDNN installed on the system at runtime. Not yet exercised in CI — treat as experimental.
+Picks Microsoft's GPU prebuilt (`onnxruntime-linux-x64-gpu-<ver>.tgz` or `onnxruntime-win-x64-gpu-<ver>.zip` — both bundle libcudart / libcudnn / libcublas, so the end user only needs the NVIDIA driver, not a full CUDA toolkit install) and compiles the shim with the CUDA dispatch path enabled. The bundle is staged under a `-gpu` suffixed dir so CPU and GPU variants don't collide.
 
-Windows
--------
+Use at the call site via:
 
-Windows is not supported in v0.1 (DirectML provider is deferred). Planned for v0.2.
+```raku
+my $session = ONNX::Native::Session.new(
+    :path<my-model.onnx>,
+    :providers<cuda cpu>,           # CUDA first, CPU for unsupported ops
+    :cuda-device-id(0),             # which GPU (default 0)
+);
+```
+
+Falls back to CPU automatically for any op CUDA can't handle — common case for transformers' embedding lookups.
+
+Supported platforms: x86_64 Linux + x86_64 Windows. Microsoft doesn't publish CUDA prebuilts for ARM64 (Linux aarch64 is Jetson territory; Windows-on-ARM has no NVIDIA driver), and macOS uses CoreML / Metal — set `ONNX_NATIVE_WITH_CUDA=1` on those platforms and the install will refuse cleanly.
+
+CI builds the GPU bundles but doesn't smoke-test them (no free GPU runners). See `RELEASING.md` for the manual pre-tag smoke checklist that runs before each binary release.
+
+Windows — DirectML
+------------------
+
+DirectML support is deferred. The DML provider isn't included in Microsoft's standard `onnxruntime-win-x64.zip` (DML is shipped exclusively as a NuGet package, separate URL + layout), and NVIDIA-on-Windows users — the dominant Windows-local-ML case — get a better experience via CUDA. AMD / Intel-iGPU Windows users who'd benefit from DML are a smaller minority; revisit if there's demand.
 
 Environment variables
 ---------------------
 
 <table class="pod-table">
 <tbody>
-<tr> <td>ONNX_NATIVE_PREFER_SYSTEM</td> <td>Skip prebuilt download, compile shim against system libonnxruntime</td> </tr> <tr> <td>ONNX_NATIVE_BINARY_ONLY</td> <td>Refuse system fallback; fail if prebuilt unavailable</td> </tr> <tr> <td>ONNX_NATIVE_BINARY_URL</td> <td>Alternate GitHub release base URL (default: Microsoft upstream)</td> </tr> <tr> <td>ONNX_NATIVE_CACHE_DIR</td> <td>Override download cache dir (default: $XDG_CACHE_HOME)</td> </tr> <tr> <td>ONNX_NATIVE_DATA_DIR</td> <td>Override staged-libs base dir (default: $XDG_DATA_HOME)</td> </tr> <tr> <td>ONNX_NATIVE_LIB_DIR</td> <td>Runtime: load shim from this dir instead of the staged dir</td> </tr> <tr> <td>ONNX_NATIVE_WITH_CUDA</td> <td>Opt in to the GPU prebuilt variant on Linux (install-time)</td> </tr>
+<tr> <td>ONNX_NATIVE_PREFER_SYSTEM</td> <td>Skip prebuilt download, compile shim against system libonnxruntime</td> <td></td> </tr> <tr> <td>ONNX_NATIVE_BINARY_ONLY</td> <td>Refuse system fallback; fail if prebuilt unavailable</td> <td></td> </tr> <tr> <td>ONNX_NATIVE_BINARY_URL</td> <td>Alternate GitHub release base URL (default: Microsoft upstream)</td> <td></td> </tr> <tr> <td>ONNX_NATIVE_CACHE_DIR</td> <td>Override download cache dir (default: $XDG_CACHE_HOME)</td> <td></td> </tr> <tr> <td>ONNX_NATIVE_DATA_DIR</td> <td>Override staged-libs base dir (default: $XDG_DATA_HOME)</td> <td></td> </tr> <tr> <td>ONNX_NATIVE_LIB_DIR</td> <td>Runtime: load shim from this dir instead of the staged dir</td> <td></td> </tr> <tr> <td>ONNX_NATIVE_WITH_CUDA</td> <td>Opt in to the CUDA GPU prebuilt variant (linux-x86_64</td> <td>windows-x86_64; install-time)</td> </tr>
 </tbody>
 </table>
 
@@ -128,15 +144,23 @@ API
 ONNX::Native::Session
 ---------------------
 
-### new(:$path!, :@providers = [CPU], :$log-id = 'onnx-native')
+### new(:$path!, :@providers = [CPU], :$log-id, :$cuda-device-id, :$coreml-flags)
 
 Load a model from disk. `:@providers` can be a list of `Provider` enum values or lowercase strings; they're tried in order at inference time (per-node), falling back to CPU for any op the chosen provider can't handle.
 
+Per-provider tuning args (only consulted when the matching provider is in `:@providers`):
+
+  * `:cuda-device-id` — integer GPU index, default 0. With a multi-GPU box this picks which CUDA device ORT runs on.
+
+  * `:coreml-flags` — bitfield matching CoreML's `COREMLFlags` enum (e.g. `COREML_FLAG_USE_CPU_ONLY = 1`, `COREML_FLAG_ONLY_ENABLE_DEVICE_WITH_ANE = 4`). Default 0 keeps CoreML's full ANE-eligible op set.
+
+DirectML and CUDA-V2 provider options aren't surfaced yet — the shim's `int64_t flags` channel takes a single int per provider, which is the right shape for CUDA `device_id` and CoreML `COREMLFlags` but not for the richer `OrtCUDAProviderOptionsV2` struct (cudnn algo search, memory limit, copy-on-default-stream). Planned for a future `:%provider-options` hash.
+
 Throws `X::ONNX::Native::Error` if the model can't be opened. Throws `X::ONNX::Native::ProviderUnavailable` if a requested provider isn't compiled into this build of the shim.
 
-### new(:$bytes!, :@providers, :$log-id)
+### new(:$bytes!, :@providers, :$log-id, :$cuda-device-id, :$coreml-flags)
 
-Load a model from an in-memory Blob.
+Load a model from an in-memory Blob. Same provider-tuning args as the path-based ctor.
 
 ### input-count(), output-count() → Int
 
@@ -211,6 +235,22 @@ ONNX::Native::Types
 ### Provider enum
 
 `CPU COREML CUDA DML`. CPU is always available. COREML is available on macOS. CUDA / DML require opt-in prebuilt variants.
+
+#### Provider flags
+
+The `onnx_shim_enable_provider` shim entry takes a 64-bit `flags` argument that is **not** a generic option dictionary — each provider interprets the bits differently:
+
+  * `COREML` — Bitfield matching CoreML's `COREMLFlags` enum (`COREML_FLAG_USE_CPU_ONLY = 1`, `COREML_FLAG_ENABLE_ON_SUBGRAPH = 2`, `COREML_FLAG_ONLY_ENABLE_DEVICE_WITH_ANE = 4`, etc.). OR together to tune behaviour.
+
+  * `CUDA` — Integer `device_id` selecting which GPU to bind to (0 = first CUDA device).
+
+  * `DML` — Integer `device_id` selecting the DirectX adapter (0 = primary). Same shape as CUDA but a different enumeration (D3D adapter index, not CUDA ordinal).
+
+  * `CPU` — Ignored. CPU is always registered and takes no flags.
+
+`Session.new` surfaces the CoreML and CUDA channels via the `:coreml-flags` and `:cuda-device-id` named args (see API § `new`). Both default to 0, which preserves the original behaviour: CoreML's full ANE-eligible op set and CUDA device 0. DML's `device_id` isn't surfaced yet (DML support itself is deferred — see Installation § DirectML).
+
+The ENUM values themselves are stable across ORT versions but the set of recognised flags grows release-to-release — consult the matching ORT C header (`coreml_provider_factory.h` for CoreML, `cuda_provider_factory.h` for CUDA) for the exact bit meanings tied to the BINARY_TAG you're running against.
 
 ### TensorInfo
 
