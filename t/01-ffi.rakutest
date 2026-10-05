@@ -3,7 +3,7 @@ use lib 'lib';
 use ONNX::Native::FFI;
 use NativeCall;
 
-plan 5;
+plan 6;
 
 subtest 'shim loads + reports API version' => {
 	plan 2;
@@ -73,4 +73,13 @@ subtest 'unknown provider gives clean error' => {
 		"error names the bogus provider: '$msg'";
 
 	onnx_shim_release_session_options($opts[0]);
+};
+
+subtest 'the runtime env leaves one PATH-shaped entry' => {
+	plan 1;
+	# Windows spells it `Path`, and %*ENV is case-sensitive: writing
+	# `<PATH>` would add a second, shorter key that a child process
+	# could inherit as its whole DLL search path.
+	my @keys = %*ENV.keys.grep({ .fc eq 'path' });
+	is @keys.elems, 1, "exactly one (got: {@keys.join(', ')})";
 };

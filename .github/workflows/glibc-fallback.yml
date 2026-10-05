@@ -21,7 +21,12 @@ on:
 
 jobs:
   old-glibc-fallback:
-    name: Ubuntu 20.04 (glibc 2.31) → fallback path
+    name: Ubuntu 20.04 (glibc 2.31) → fallback path / ${{ matrix.raku-version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 2026.07: last legacy-frontend release. 2026.09: RakuAST is the default.
+        raku-version: ['2026.07', '2026.09']
     runs-on: ubuntu-latest
     container:
       image: ubuntu:20.04
@@ -47,7 +52,7 @@ jobs:
 
       - uses: Raku/setup-raku@v1
         with:
-          raku-version: 'latest'
+          raku-version: ${{ matrix.raku-version }}
 
       # Case 1: BINARY_ONLY=1 on old glibc → must die cleanly with
       # the glibc-mismatch message. There's no fallback that can

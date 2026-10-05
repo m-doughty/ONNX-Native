@@ -124,10 +124,16 @@ sub _configure-runtime-env() {
 	return unless $lib-dir.d;
 	my $lib-str = $lib-dir.Str;
 
-	# Belt: PATH prepend.
-	my $current = %*ENV<PATH> // '';
+	# Belt: PATH prepend. Windows environment names are
+	# case-insensitive and the entry a process is handed is spelled
+	# `Path`; Raku's %*ENV is a case-sensitive Hash, so writing
+	# `<PATH>` would add a second key holding only our dir, which a
+	# child process spawned later may inherit as its whole search
+	# path. Update whichever spelling the process actually has.
+	my Str $path-key = %*ENV.keys.first({ .fc eq 'path' }) // 'PATH';
+	my $current = %*ENV{$path-key} // '';
 	unless $current.starts-with("$lib-str;") || $current eq $lib-str {
-		%*ENV<PATH> = "$lib-str;$current";
+		%*ENV{$path-key} = "$lib-str;$current";
 	}
 
 	# Braces: SetDllDirectoryW. kernel32.dll is pre-loaded in
